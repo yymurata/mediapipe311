@@ -1,0 +1,22 @@
+version: "3.9"
+
+services:
+  mmpose-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mmpose311-dev
+    container_name: mmpose311-dev
+    working_dir: /workspace
+    volumes:
+      - .:/workspace:cached
+      - pip-cache:/home/devuser/.cache/pip
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
+    stdin_open: true
+    tty: true
+    command: ["sleep", "infinity"]
+
+volumes:
+  pip-cache:
