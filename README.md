@@ -155,6 +155,21 @@ If your output is in a different folder:
 python plot_gait.py --batch-config batch_config.json --output-dir /output
 ```
 
+You can also set display ranges per entry in `batch_config.json`.
+If omitted, the plot defaults to `start_sec` / `end_sec`.
+
+```json
+[
+  {
+    "input_video": "/data/mp4/sample.mp4",
+    "start_sec": 5,
+    "end_sec": 15,
+    "display_start_sec": 7,
+    "display_end_sec": 12
+  }
+]
+```
+
 ### Save plots to files (PNG/PDF)
 
 Save plots without GUI:

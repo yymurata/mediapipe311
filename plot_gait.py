@@ -68,6 +68,8 @@ parser.add_argument(
 )
 parser.add_argument("--save-formats", default="png", help="保存形式 (例: png,pdf)")
 parser.add_argument("--no-show", action="store_true", help="グラフ表示を行わない")
+parser.add_argument("--start-sec", type=float, default=None, help="表示開始秒（グラフのX軸）")
+parser.add_argument("--end-sec", type=float, default=None, help="表示終了秒（グラフのX軸）")
 args = parser.parse_args()
 
 def csv_from_config(config, output_dir):
@@ -89,14 +91,31 @@ if args.batch_config:
     except json.JSONDecodeError:
         print("エラー: JSONファイルの形式が正しくありません。")
         exit()
-    csv_list = [csv_from_config(config, args.output_dir) for config in batch_list]
+    csv_list = []
+    for config in batch_list:
+        display_start = config.get("display_start_sec", config.get("start_sec"))
+        display_end = config.get("display_end_sec", config.get("end_sec"))
+        csv_list.append(
+            {
+                "csv_path": csv_from_config(config, args.output_dir),
+                "display_start_sec": display_start,
+                "display_end_sec": display_end,
+            }
+        )
 else:
     if not args.csv:
         print("エラー: 入力CSVが指定されていません。引数またはCSV_FILE環境変数で指定してください。")
         exit()
-    csv_list = [args.csv]
+    csv_list = [
+        {
+            "csv_path": args.csv,
+            "display_start_sec": None,
+            "display_end_sec": None,
+        }
+    ]
 
-for csv_path in csv_list:
+for item in csv_list:
+    csv_path = item["csv_path"]
     if not os.path.exists(csv_path):
         print(f"エラー: {csv_path} が見つかりません。")
         continue
@@ -187,10 +206,38 @@ for csv_path in csv_list:
     # 3. 足首高さ
     sns.lineplot(ax=axes[2], data=df, x=time_col, y='left_ankle_y', label='左 足首高さ', color='blue', alpha=0.7)
     sns.lineplot(ax=axes[2], data=df, x=time_col, y='right_ankle_y', label='右 足首高さ', color='red', alpha=0.7, linestyle='--')
-    axes[2].invert_yaxis()
     axes[2].set_title('足首の上下動 (リズム確認用)', fontsize=14)
     axes[2].set_xlabel('時間 (秒)', fontsize=12)
     axes[2].set_ylabel('高さ (Y座標)', fontsize=12)
+
+    display_start = args.start_sec if args.start_sec is not None else item["display_start_sec"]
+    display_end = args.end_sec if args.end_sec is not None else item["display_end_sec"]
+    if display_start is not None or display_end is not None:
+        for ax in axes:
+            ax.set_xlim(left=display_start, right=display_end)
+
+    if display_start is not None or display_end is not None:
+        mask = pd.Series(True, index=df.index)
+        if display_start is not None:
+            mask &= df[time_col] >= display_start
+        if display_end is not None:
+            mask &= df[time_col] <= display_end
+        df_range = df[mask]
+        if not df_range.empty:
+            def set_ylim(ax, values):
+                ymin = values.min()
+                ymax = values.max()
+                if np.isfinite(ymin) and np.isfinite(ymax):
+                    pad = (ymax - ymin) * 0.05
+                    if pad == 0:
+                        pad = 1.0
+                    ax.set_ylim(ymin - pad, ymax + pad)
+
+            set_ylim(axes[0], pd.concat([df_range['left_hip_angle'], df_range['right_hip_angle']]))
+            set_ylim(axes[1], pd.concat([df_range['left_knee_angle'], df_range['right_knee_angle']]))
+            set_ylim(axes[2], pd.concat([df_range['left_ankle_y'], df_range['right_ankle_y']]))
+
+    axes[2].invert_yaxis()
 
     plt.tight_layout()
 
