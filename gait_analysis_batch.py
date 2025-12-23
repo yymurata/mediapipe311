@@ -14,6 +14,7 @@ import shutil
 MODEL_PATH = 'pose_landmarker_lite.task'
 CONFIG_FILE = 'batch_config.json' # バッチ処理リスト
 SHOW_WINDOW = os.environ.get('SHOW_WINDOW', '1') not in ('0', 'false', 'False')
+OUTPUT_DIR = os.environ.get('OUTPUT_DIR', 'output')
 
 def process_video(config):
     video_path = config.get('input_video')
@@ -28,8 +29,9 @@ def process_video(config):
     base_name = os.path.splitext(os.path.basename(video_path))[0]
     time_suffix = f"_{start_sec}s-{end_sec if end_sec else 'end'}s"
     
-    csv_output = f"{base_name}{time_suffix}_gait.csv"
-    video_output = f"{base_name}{time_suffix}_tracked.mp4"
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    csv_output = os.path.join(OUTPUT_DIR, f"{base_name}{time_suffix}_gait.csv")
+    video_output = os.path.join(OUTPUT_DIR, f"{base_name}{time_suffix}_tracked.mp4")
 
     print(f"\n=== 処理開始: {video_path} ===")
     print(f"区間: {start_sec}秒 〜 {end_sec if end_sec else '最後'}まで")

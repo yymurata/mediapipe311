@@ -1,11 +1,11 @@
 [
     {
-        "input_video": "20251128_fast.mp4",
+        "input_video": "/data/mp4/20251128_fast.mp4",
         "start_sec": 8,
         "end_sec": 35
     },
         {
-        "input_video": "20251128_fast.mp4",
+        "input_video": "/data/mp4/20251128_fast.mp4",
         "start_sec": 50,
         "end_sec": 75
     }

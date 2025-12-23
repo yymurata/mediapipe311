@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   mmpose-dev:
     build:
@@ -10,10 +8,17 @@ services:
     working_dir: /workspace
     volumes:
       - .:/workspace:cached
+      # Host mp4 folder: set MP4_DIR to change it per run
+      - "${MP4_DIR:-C:/Python/mmpose/mp4}:/data/mp4"
+      # Host output folder: set OUTPUT_DIR to change it per run
+      - "${OUTPUT_DIR:-C:/Python/mmpose/output}:/output"
       - pip-cache:/home/devuser/.cache/pip
     environment:
       - PYTHONDONTWRITEBYTECODE=1
       - PYTHONUNBUFFERED=1
+      - SHOW_WINDOW=0
+      - MPLCONFIGDIR=/tmp/matplotlib
+      - OUTPUT_DIR=/output
     stdin_open: true
     tty: true
     command: ["sleep", "infinity"]
