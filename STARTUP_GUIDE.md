@@ -1,52 +1,75 @@
 WSL + Docker + VS Code 再開手順（mediapipe311）
 
-1) WSL を開く
-Windows のターミナルから Ubuntu を開く。
-wsl
+## 手順
 
-2) プロジェクトへ移動して VS Code を起動
+### 1) WSL を開く
+Windows のターミナルから Ubuntu を開く。
+
+```bash
+wsl
+```
+
+### 2) プロジェクトへ移動して VS Code を起動
+```bash
 cd /home/yasun/projects/mediapipe311
 code .
+```
 
-3) VS Code でコンテナにアタッチ
+### 3) VS Code でコンテナにアタッチ
 VS Code 左下「><」→ Attach to Running Container... → mediapipe311-dev
 
-4) /workspace を開く
-VS Code → File → Open Folder... → /workspace
-ここに plot_gait.py / gait_analysis_batch.py が見える。
+### 4) /workspace を開く
+VS Code → File → Open Folder... → /workspace  
+ここに `plot_gait.py` / `gait_analysis_batch.py` が見える。
 
-5) コンテナ内ターミナルで実行
+### 5) コンテナ内ターミナルで実行
+```bash
 cd /workspace
 python gait_analysis_batch.py --batch-config batch_config.json
+```
 
-補足: コンテナが起動していない場合
+## 補足: コンテナが起動していない場合
 WSL で以下を実行して起動する。
+
+```bash
 docker ps
 docker start mediapipe311-dev
+```
 
-コンテナ操作（よく使うもの）
-1) 起動中の一覧
+## コンテナ操作（よく使うもの）
+
+### 1) 起動中の一覧
+```bash
 docker ps
+```
 
-2) 停止中を含む一覧
+### 2) 停止中を含む一覧
+```bash
 docker ps -a
+```
 
-3) 特定コンテナを起動
+### 3) 特定コンテナを起動
+```bash
 docker start <container_name>
-例: docker start mediapipe311-dev
+```
+例: `docker start mediapipe311-dev`
 
-4) 特定コンテナを停止
+### 4) 特定コンテナを停止
+```bash
 docker stop <container_name>
-例: docker stop mediapipe311-dev
+```
+例: `docker stop mediapipe311-dev`
 
-5) 特定コンテナを作成して起動（今回の構成）
+### 5) 特定コンテナを作成して起動（今回の構成）
+```bash
 docker run -d --name mediapipe311-dev \
   -v /home/yasun/projects/mediapipe311:/workspace \
   -v /mnt/c/Python/mmpose/mp4:/data/mp4 \
   -v /mnt/c/Python/mmpose/output:/output \
   -v mmpose311_pip-cache:/home/devuser/.cache/pip \
   mmpose311-dev sleep infinity
+```
 
-補足: Attach 後のターミナルはコンテナ内
-コンテナ内では docker コマンドは使えない。
-code . は WSL 側で実行する。
+## 補足: Attach 後のターミナルはコンテナ内
+コンテナ内では `docker` コマンドは使えない。  
+`code .` は WSL 側で実行する。
