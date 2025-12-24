@@ -1,4 +1,4 @@
-# MMpose 3.11 Dev Environment
+# Mediapipe 3.11 Dev Environment
 
 This repo provides a stable Docker-based development environment for MMpose using Python 3.11.
 For gait analysis scripts and usage, see `README.md`.
