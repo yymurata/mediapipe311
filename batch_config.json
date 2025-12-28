@@ -9,6 +9,8 @@
         {
         "input_video": "/data/mp4/20251128_fast.mp4",
         "start_sec": 50,
-        "end_sec": 75
+        "end_sec": 75,
+        "display_start_sec": 58,
+        "display_end_sec": 72
     }
 ]
