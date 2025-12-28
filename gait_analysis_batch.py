@@ -55,7 +55,15 @@ def process_video(config):
         'right_shoulder_x', 'right_shoulder_y',
         'right_hip_x', 'right_hip_y',
         'right_knee_x', 'right_knee_y',
-        'right_ankle_x', 'right_ankle_y'
+        'right_ankle_x', 'right_ankle_y',
+        'left_eye_x', 'left_eye_y',
+        'right_eye_x', 'right_eye_y',
+        'left_ear_x', 'left_ear_y',
+        'right_ear_x', 'right_ear_y',
+        'left_heel_x', 'left_heel_y',
+        'right_heel_x', 'right_heel_y',
+        'left_foot_index_x', 'left_foot_index_y',
+        'right_foot_index_x', 'right_foot_index_y'
     ]
     
     with open(csv_output, 'w', newline='') as f:
@@ -139,8 +147,12 @@ def process_video(config):
                         current_time_sec,      # 動画内の絶対時刻
                         lm[11].x, lm[11].y, lm[23].x, lm[23].y, 
                         lm[25].x, lm[25].y, lm[27].x, lm[27].y, 
-                        lm[12].x, lm[12].y, lm[24].x, lm[24].y, 
-                        lm[26].x, lm[26].y, lm[28].x, lm[28].y 
+                        lm[12].x, lm[12].y, lm[24].x, lm[24].y,
+                        lm[26].x, lm[26].y, lm[28].x, lm[28].y,
+                        lm[2].x, lm[2].y, lm[5].x, lm[5].y,
+                        lm[7].x, lm[7].y, lm[8].x, lm[8].y,
+                        lm[29].x, lm[29].y, lm[30].x, lm[30].y,
+                        lm[31].x, lm[31].y, lm[32].x, lm[32].y
                     ]
                     writer.writerow(row)
 
@@ -154,6 +166,14 @@ def process_video(config):
                     cv2.line(frame, (int(lm[12].x*w), int(lm[12].y*h)), (int(lm[24].x*w), int(lm[24].y*h)), (0, 0, 255), 2)
                     cv2.line(frame, (int(lm[24].x*w), int(lm[24].y*h)), (int(lm[26].x*w), int(lm[26].y*h)), (0, 0, 255), 2)
                     cv2.line(frame, (int(lm[26].x*w), int(lm[26].y*h)), (int(lm[28].x*w), int(lm[28].y*h)), (0, 0, 255), 2)
+                    # 眼/耳（点）
+                    cv2.circle(frame, (int(lm[2].x*w), int(lm[2].y*h)), 4, (255, 0, 0), -1)
+                    cv2.circle(frame, (int(lm[5].x*w), int(lm[5].y*h)), 4, (0, 0, 255), -1)
+                    cv2.circle(frame, (int(lm[7].x*w), int(lm[7].y*h)), 4, (255, 0, 0), -1)
+                    cv2.circle(frame, (int(lm[8].x*w), int(lm[8].y*h)), 4, (0, 0, 255), -1)
+                    # かかと〜足先（ライン）
+                    cv2.line(frame, (int(lm[29].x*w), int(lm[29].y*h)), (int(lm[31].x*w), int(lm[31].y*h)), (255, 0, 0), 2)
+                    cv2.line(frame, (int(lm[30].x*w), int(lm[30].y*h)), (int(lm[32].x*w), int(lm[32].y*h)), (0, 0, 255), 2)
 
                 # FFmpegへ書き込み
                 try:

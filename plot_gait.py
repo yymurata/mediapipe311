@@ -55,6 +55,27 @@ def calculate_knee_angle_vec(hip_x, hip_y, knee_x, knee_y, ankle_x, ankle_y):
     angles = np.degrees(np.arccos(cos_val))
     return np.where(denom == 0, 180.0, angles)
 
+def calculate_vector_angle_deg(x1, y1, x2, y2):
+    return np.degrees(np.arctan2(y2 - y1, x2 - x1))
+
+def calculate_horizontal_signed_angle_deg(x1, y1, x2, y2):
+    dx = x2 - x1
+    dy = y2 - y1
+    return -np.degrees(np.arctan2(dy, np.abs(dx)))
+
+def calculate_line_angle_deg(ax, ay, bx, by, cx, cy, dx, dy):
+    v1x, v1y = bx - ax, by - ay
+    v2x, v2y = dx - cx, dy - cy
+    dot = v1x * v2x + v1y * v2y
+    mag1 = np.hypot(v1x, v1y)
+    mag2 = np.hypot(v2x, v2y)
+    denom = mag1 * mag2
+    cos_val = np.divide(dot, denom, out=np.zeros_like(dot), where=denom != 0)
+    cos_val = np.clip(cos_val, -1.0, 1.0)
+    angles = np.degrees(np.arccos(cos_val))
+    angles = 180.0 - angles
+    return np.where(denom == 0, 180.0, angles)
+
 # === メイン処理 ===
 parser = argparse.ArgumentParser(description="CSVの歩行解析データを可視化します。")
 parser.add_argument("csv", nargs="?", default=os.environ.get("CSV_FILE", ""), help="入力CSVファイルパス")
@@ -175,16 +196,75 @@ for item in csv_list:
         print(f"エラー: データ列 {e} が不足しています。")
         continue
 
+    try:
+        df['left_ankle_angle'] = calculate_line_angle_deg(
+            df['left_knee_x'].to_numpy(), df['left_knee_y'].to_numpy(),
+            df['left_ankle_x'].to_numpy(), df['left_ankle_y'].to_numpy(),
+            df['left_heel_x'].to_numpy(), df['left_heel_y'].to_numpy(),
+            df['left_foot_index_x'].to_numpy(), df['left_foot_index_y'].to_numpy()
+        )
+
+        df['right_ankle_angle'] = calculate_line_angle_deg(
+            df['right_knee_x'].to_numpy(), df['right_knee_y'].to_numpy(),
+            df['right_ankle_x'].to_numpy(), df['right_ankle_y'].to_numpy(),
+            df['right_heel_x'].to_numpy(), df['right_heel_y'].to_numpy(),
+            df['right_foot_index_x'].to_numpy(), df['right_foot_index_y'].to_numpy()
+        )
+
+        dominant_side = "right" if is_moving_right else "left"
+        dominant_label = "右" if is_moving_right else "左"
+        dominant_color = "red" if is_moving_right else "blue"
+
+        df['dominant_gaze_angle'] = calculate_horizontal_signed_angle_deg(
+            df[f'{dominant_side}_ear_x'].to_numpy(),
+            df[f'{dominant_side}_ear_y'].to_numpy(),
+            df[f'{dominant_side}_eye_x'].to_numpy(),
+            df[f'{dominant_side}_eye_y'].to_numpy()
+        )
+        df['dominant_head_posture_angle'] = calculate_vector_angle_deg(
+            df[f'{dominant_side}_shoulder_x'].to_numpy(),
+            df[f'{dominant_side}_shoulder_y'].to_numpy(),
+            df[f'{dominant_side}_ear_x'].to_numpy(),
+            df[f'{dominant_side}_ear_y'].to_numpy()
+        )
+
+    except KeyError as e:
+        print(f"エラー: 追加解析に必要なデータ列 {e} が不足しています。")
+        continue
+
     # --- グラフ描画 ---
     sns.set_theme(style="whitegrid")
     font_family = os.environ.get("PLOT_FONT_FAMILY", "Noto Sans CJK JP")
     plt.rcParams['font.family'] = font_family
 
-    fig, axes = plt.subplots(3, 1, figsize=(12, 12), sharex=True)
+    fig, axes = plt.subplots(5, 1, figsize=(12, 18), sharex=True)
+
+    dominant_style = '-'
+    nondominant_style = ':'
+    left_style = nondominant_style if is_moving_right else dominant_style
+    right_style = dominant_style if is_moving_right else nondominant_style
 
     # 1. 股関節
-    sns.lineplot(ax=axes[0], data=df, x=time_col, y='left_hip_angle', label='左 股関節', color='blue', linewidth=2)
-    sns.lineplot(ax=axes[0], data=df, x=time_col, y='right_hip_angle', label='右 股関節', color='red', linewidth=2, linestyle='--')
+    sns.lineplot(
+        ax=axes[0],
+        data=df,
+        x=time_col,
+        y='left_hip_angle',
+        label='左 股関節',
+        color='blue',
+        linewidth=2,
+        linestyle=left_style
+    )
+    sns.lineplot(
+        ax=axes[0],
+        data=df,
+        x=time_col,
+        y='right_hip_angle',
+        label='右 股関節',
+        color='red',
+        linewidth=2,
+        linestyle=right_style
+    )
     axes[0].set_title('股関節の角度 (数値大=伸展/後, 数値小=屈曲/前)', fontsize=14) # タイトル変更
     axes[0].axhline(180, color='gray', linestyle=':', alpha=0.8, label='直立ライン')
     axes[0].set_ylabel('角度 (度)', fontsize=12)
@@ -195,20 +275,109 @@ for item in csv_list:
     axes[0].legend(loc='upper right')
 
     # 2. 膝関節
-    sns.lineplot(ax=axes[1], data=df, x=time_col, y='left_knee_angle', label='左 膝関節', color='blue', linewidth=2)
-    sns.lineplot(ax=axes[1], data=df, x=time_col, y='right_knee_angle', label='右 膝関節', color='red', linewidth=2, linestyle='--')
+    sns.lineplot(
+        ax=axes[1],
+        data=df,
+        x=time_col,
+        y='left_knee_angle',
+        label='左 膝関節',
+        color='blue',
+        linewidth=2,
+        linestyle=left_style
+    )
+    sns.lineplot(
+        ax=axes[1],
+        data=df,
+        x=time_col,
+        y='right_knee_angle',
+        label='右 膝関節',
+        color='red',
+        linewidth=2,
+        linestyle=right_style
+    )
     axes[1].set_title('膝関節の角度 (180=伸展, 小さい=屈曲)', fontsize=14)
     axes[1].axhline(180, color='gray', linestyle=':', alpha=0.5)
     axes[1].set_ylabel('角度 (度)', fontsize=12)
     axes[1].set_ylim(60, 190)
     axes[1].legend(loc='upper right')
 
-    # 3. 足首高さ
-    sns.lineplot(ax=axes[2], data=df, x=time_col, y='left_ankle_y', label='左 足首高さ', color='blue', alpha=0.7)
-    sns.lineplot(ax=axes[2], data=df, x=time_col, y='right_ankle_y', label='右 足首高さ', color='red', alpha=0.7, linestyle='--')
-    axes[2].set_title('足首の上下動 (リズム確認用)', fontsize=14)
-    axes[2].set_xlabel('時間 (秒)', fontsize=12)
-    axes[2].set_ylabel('高さ (Y座標)', fontsize=12)
+    # 3. 足関節
+    sns.lineplot(
+        ax=axes[2],
+        data=df,
+        x=time_col,
+        y='left_ankle_angle',
+        label='左 足関節',
+        color='blue',
+        linewidth=2,
+        linestyle=left_style
+    )
+    sns.lineplot(
+        ax=axes[2],
+        data=df,
+        x=time_col,
+        y='right_ankle_angle',
+        label='右 足関節',
+        color='red',
+        linewidth=2,
+        linestyle=right_style
+    )
+    axes[2].set_title('足関節の角度 (180=伸展, 小さい=屈曲)', fontsize=14)
+    axes[2].axhline(180, color='gray', linestyle=':', alpha=0.5)
+    axes[2].axhline(90, color='gray', linestyle=':', alpha=0.5)
+    axes[2].set_ylabel('角度 (度)', fontsize=12)
+    axes[2].set_ylim(60, 190)
+    axes[2].legend(loc='upper right')
+
+    # 4. つま先/踵の高さ（優位側）
+    sns.lineplot(
+        ax=axes[3],
+        data=df,
+        x=time_col,
+        y=f'{dominant_side}_heel_y',
+        label=f'{dominant_label} 踵高さ',
+        color=dominant_color,
+        alpha=0.7
+    )
+    sns.lineplot(
+        ax=axes[3],
+        data=df,
+        x=time_col,
+        y=f'{dominant_side}_foot_index_y',
+        label=f'{dominant_label} つま先高さ',
+        color=dominant_color,
+        alpha=0.7,
+        linestyle=':'
+    )
+    axes[3].set_title('つま先/踵の上下動（優位側）', fontsize=14)
+    axes[3].set_ylabel('高さ (Y座標)', fontsize=12)
+    axes[3].legend(loc='upper right')
+
+    # 5. 視線角度（耳→目） + 頭の起き具合（肩→耳）
+    sns.lineplot(
+        ax=axes[4],
+        data=df,
+        x=time_col,
+        y='dominant_gaze_angle',
+        label=f'{dominant_label} 視線角度(耳→目)',
+        color=dominant_color,
+        linewidth=2
+    )
+    sns.lineplot(
+        ax=axes[4],
+        data=df,
+        x=time_col,
+        y='dominant_head_posture_angle',
+        label=f'{dominant_label} 頭の起き具合(肩→耳)',
+        color=dominant_color,
+        linewidth=2,
+        linestyle=':'
+    )
+    axes[4].set_title('視線角度/頭の起き具合（画像座標）', fontsize=14)
+    axes[4].axhline(0, color='gray', linestyle=':', alpha=0.5)
+    axes[4].set_xlabel('時間 (秒)', fontsize=12)
+    axes[4].set_ylabel('角度 (度)', fontsize=12)
+    axes[4].legend(loc='upper right')
 
     display_start = args.start_sec if args.start_sec is not None else item["display_start_sec"]
     display_end = args.end_sec if args.end_sec is not None else item["display_end_sec"]
@@ -235,9 +404,30 @@ for item in csv_list:
 
             set_ylim(axes[0], pd.concat([df_range['left_hip_angle'], df_range['right_hip_angle']]))
             set_ylim(axes[1], pd.concat([df_range['left_knee_angle'], df_range['right_knee_angle']]))
-            set_ylim(axes[2], pd.concat([df_range['left_ankle_y'], df_range['right_ankle_y']]))
+            set_ylim(axes[2], pd.concat([df_range['left_ankle_angle'], df_range['right_ankle_angle']]))
+            set_ylim(
+                axes[3],
+                pd.concat([
+                    df_range[f'{dominant_side}_heel_y'],
+                    df_range[f'{dominant_side}_foot_index_y']
+                ])
+            )
+            set_ylim(
+                axes[4],
+                pd.concat([df_range['dominant_gaze_angle'], df_range['dominant_head_posture_angle']])
+            )
+            ymin, ymax = axes[4].get_ylim()
+            if ymin > 0:
+                ymin = 0
+            if ymax < 0:
+                ymax = 0
+            if ymin == 0:
+                ymin -= 1
+            if ymax == 0:
+                ymax += 1
+            axes[4].set_ylim(ymin, ymax)
 
-    axes[2].invert_yaxis()
+    axes[3].invert_yaxis()
 
     plt.tight_layout()
 
