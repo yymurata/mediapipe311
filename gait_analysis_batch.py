@@ -11,7 +11,7 @@ import os
 import shutil
 
 # === 設定 ===
-MODEL_PATH = 'pose_landmarker_lite.task'
+MODEL_PATH = 'pose_landmarker_heavy.task'
 CONFIG_FILE = 'batch_config.json' # バッチ処理リスト
 SHOW_WINDOW = os.environ.get('SHOW_WINDOW', '1') not in ('0', 'false', 'False')
 OUTPUT_DIR = os.environ.get('OUTPUT_DIR', 'output')
