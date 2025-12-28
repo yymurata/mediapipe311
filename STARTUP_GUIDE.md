@@ -17,6 +17,11 @@ code .
 
 ### 3) VS Code でコンテナにアタッチ
 VS Code 左下「><」→ Attach to Running Container... → mediapipe311-dev
+※ `there are no running containers` が出る場合は、先にコンテナを起動する。  
+```bash
+docker start mediapipe311-dev
+docker ps
+```
 
 ### 4) /workspace を開く
 VS Code → File → Open Folder... → /workspace  
