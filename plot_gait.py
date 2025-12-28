@@ -73,7 +73,6 @@ def calculate_line_angle_deg(ax, ay, bx, by, cx, cy, dx, dy):
     cos_val = np.divide(dot, denom, out=np.zeros_like(dot), where=denom != 0)
     cos_val = np.clip(cos_val, -1.0, 1.0)
     angles = np.degrees(np.arccos(cos_val))
-    angles = 180.0 - angles
     return np.where(denom == 0, 180.0, angles)
 
 # === メイン処理 ===
