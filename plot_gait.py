@@ -102,6 +102,146 @@ def calculate_line_angle_deg(ax, ay, bx, by, cx, cy, dx, dy):
     angles = np.degrees(np.arccos(cos_val))
     return np.where(denom == 0, 180.0, angles)
 
+def detect_unstable_frames(values, k=3.0):
+    med = np.median(values)
+    mad = np.median(np.abs(values - med))
+    thresh = med + k * mad
+    return values > thresh
+
+def summarize_unstable_rates(speed_map, k=3.0):
+    rates = {}
+    for name, values in speed_map.items():
+        mask = detect_unstable_frames(values, k=k)
+        rates[name] = mask.mean() * 100.0
+    return rates
+
+def smooth_series(values, window=5):
+    if window <= 1:
+        return values
+    pad = window // 2
+    padded = np.pad(values, (pad, pad), mode="edge")
+    kernel = np.ones(window) / window
+    return np.convolve(padded, kernel, mode="valid")
+
+def apply_time_buffer(mask, times, buffer_sec):
+    if buffer_sec <= 0:
+        return mask
+    expanded = mask.copy()
+    selected_times = times[mask]
+    if selected_times.size == 0:
+        return expanded
+    for t in selected_times:
+        expanded |= (times >= t - buffer_sec) & (times <= t + buffer_sec)
+    return expanded
+
+def build_unstable_mask(points, times, k, buffer_sec):
+    speed_list = []
+    neg_mask = np.zeros(times.shape, dtype=bool)
+    for x, y in points:
+        speed_list.append(np.hypot(np.diff(x), np.diff(y)))
+        neg_mask |= (x < 0) | (y < 0)
+    speed_avg = sum(speed_list) / len(speed_list)
+    unstable = detect_unstable_frames(speed_avg, k=k)
+    unstable = np.concatenate([[False], unstable])
+    unstable |= neg_mask
+    unstable = apply_time_buffer(unstable, times, buffer_sec)
+    return unstable
+
+def mask_to_segments(times, mask):
+    segments = []
+    in_segment = False
+    start_t = None
+    for t, is_bad in zip(times, mask):
+        if is_bad and not in_segment:
+            start_t = t
+            in_segment = True
+        elif not is_bad and in_segment:
+            segments.append((start_t, t))
+            in_segment = False
+    if in_segment:
+        segments.append((start_t, times[-1]))
+    return segments
+
+def select_smoothing_window(values, times, stable_mask, max_window=11, cv_threshold=0.3, min_window=5):
+    best_window = min_window
+    best_cv = None
+    best_smooth = smooth_series(values, window=best_window)
+
+    for window in range(min_window, max_window + 1, 2):
+        smooth_vals = smooth_series(values, window=window)
+        peak_idx, _ = find_contacts_between_peaks(smooth_vals, times, stable_mask, min_interval_sec=0.2)
+        if len(peak_idx) < 3:
+            continue
+        intervals = np.diff(times[peak_idx])
+        mean = intervals.mean()
+        if mean == 0:
+            continue
+        cv = intervals.std() / mean
+        if best_cv is None or cv < best_cv:
+            best_cv = cv
+            best_window = window
+            best_smooth = smooth_vals
+
+    if best_cv is None or best_cv <= cv_threshold:
+        return best_window, best_cv, best_smooth
+    return best_window, best_cv, best_smooth
+
+def find_contacts_between_peaks(
+    values,
+    times,
+    stable_mask,
+    min_interval_sec=0.2,
+    peak_prominence=0.01,
+    peak_window=10
+):
+    peak_idx = []
+    last_time = None
+    for i in range(1, len(values) - 1):
+        if not stable_mask[i]:
+            continue
+        if values[i] <= values[i - 1] and values[i] <= values[i + 1]:
+            start = max(0, i - peak_window)
+            end = min(len(values), i + peak_window + 1)
+            local_max = values[start:end].max()
+            if (local_max - values[i]) < peak_prominence:
+                continue
+            if last_time is None or (times[i] - last_time) >= min_interval_sec:
+                peak_idx.append(i)
+                last_time = times[i]
+
+    contact_idx = []
+    for start, end in zip(peak_idx, peak_idx[1:]):
+        segment = np.arange(start, end + 1)
+        segment = segment[stable_mask[segment]]
+        if segment.size == 0:
+            continue
+        max_i = segment[np.argmax(values[segment])]
+        contact_idx.append(int(max_i))
+
+    return peak_idx, contact_idx
+
+def find_contacts_with_fallback(
+    values,
+    times,
+    stable_mask,
+    min_interval_sec,
+    peak_prominence,
+    peak_window
+):
+    for scale in (1.0, 0.5, 0.25, 0.0):
+        prom = peak_prominence * scale
+        peak_idx, contact_idx = find_contacts_between_peaks(
+            values,
+            times,
+            stable_mask,
+            min_interval_sec=min_interval_sec,
+            peak_prominence=prom,
+            peak_window=peak_window
+        )
+        if peak_idx:
+            return peak_idx, contact_idx, prom
+    return [], [], 0.0
+
 # === メイン処理 ===
 parser = argparse.ArgumentParser(description="CSVの歩行解析データを可視化します。")
 parser.add_argument("csv", nargs="?", default=os.environ.get("CSV_FILE", ""), help="入力CSVファイルパス")
@@ -117,6 +257,30 @@ parser.add_argument("--save-formats", default="png", help="保存形式 (例: pn
 parser.add_argument("--no-show", action="store_true", help="グラフ表示を行わない")
 parser.add_argument("--start-sec", type=float, default=None, help="表示開始秒（グラフのX軸）")
 parser.add_argument("--end-sec", type=float, default=None, help="表示終了秒（グラフのX軸）")
+parser.add_argument(
+    "--unstable-k",
+    type=float,
+    default=float(os.environ.get("UNSTABLE_K", "5.0")),
+    help="不安定判定の閾値係数 (median + k * MAD)"
+)
+parser.add_argument(
+    "--unstable-buffer-ms",
+    type=float,
+    default=float(os.environ.get("UNSTABLE_BUFFER_MS", "50")),
+    help="不安定区間の前後に追加で除外する時間(ms)"
+)
+parser.add_argument(
+    "--peak-prominence",
+    type=float,
+    default=float(os.environ.get("PEAK_PROMINENCE", "0.01")),
+    help="遊脚ピーク検出の最小プロミネンス (正規化座標)"
+)
+parser.add_argument(
+    "--peak-window",
+    type=int,
+    default=int(os.environ.get("PEAK_WINDOW", "10")),
+    help="ピーク判定の近傍ウィンドウ(フレーム)"
+)
 args = parser.parse_args()
 
 def csv_from_config(config, output_dir):
@@ -276,12 +440,178 @@ for item in csv_list:
         print(f"エラー: 追加解析に必要なデータ列 {e} が不足しています。")
         continue
 
+    dominant_hip_x = df[f'{dominant_side}_hip_x'].to_numpy()
+    dominant_hip_y = df[f'{dominant_side}_hip_y'].to_numpy()
+    dominant_shoulder_x = df[f'{dominant_side}_shoulder_x'].to_numpy()
+    dominant_shoulder_y = df[f'{dominant_side}_shoulder_y'].to_numpy()
+    dominant_knee_x = df[f'{dominant_side}_knee_x'].to_numpy()
+    dominant_knee_y = df[f'{dominant_side}_knee_y'].to_numpy()
+    dominant_heel_x = df[f'{dominant_side}_heel_x'].to_numpy()
+    dominant_heel_y = df[f'{dominant_side}_heel_y'].to_numpy()
+    dominant_ankle_x = df[f'{dominant_side}_ankle_x'].to_numpy()
+    dominant_ankle_y = df[f'{dominant_side}_ankle_y'].to_numpy()
+    dominant_foot_x = df[f'{dominant_side}_foot_index_x'].to_numpy()
+    dominant_foot_y = df[f'{dominant_side}_foot_index_y'].to_numpy()
+
+    hip_to_knee = np.hypot(dominant_hip_x - dominant_knee_x, dominant_hip_y - dominant_knee_y)
+    knee_to_ankle = np.hypot(dominant_knee_x - dominant_ankle_x, dominant_knee_y - dominant_ankle_y)
+
+    times = df[time_col].to_numpy()
+    buffer_sec = args.unstable_buffer_ms / 1000.0
+    speed_hip = np.hypot(np.diff(dominant_hip_x), np.diff(dominant_hip_y))
+    speed_knee = np.hypot(np.diff(dominant_knee_x), np.diff(dominant_knee_y))
+    speed_ankle = np.hypot(np.diff(dominant_ankle_x), np.diff(dominant_ankle_y))
+    speed_avg = (speed_hip + speed_knee + speed_ankle) / 3.0
+    unstable_mask = detect_unstable_frames(speed_avg, k=args.unstable_k)
+    unstable_mask = np.concatenate([[False], unstable_mask])
+    neg_mask = (
+        (dominant_hip_x < 0) | (dominant_hip_y < 0) |
+        (dominant_knee_x < 0) | (dominant_knee_y < 0) |
+        (dominant_ankle_x < 0) | (dominant_ankle_y < 0)
+    )
+    unstable_mask = unstable_mask | neg_mask
+    unstable_mask = apply_time_buffer(unstable_mask, times, buffer_sec)
+    unstable_ratio = unstable_mask.mean() * 100.0
+
+    unstable_hip = build_unstable_mask(
+        [
+            (dominant_shoulder_x, dominant_shoulder_y),
+            (dominant_hip_x, dominant_hip_y),
+            (dominant_knee_x, dominant_knee_y),
+        ],
+        times,
+        args.unstable_k,
+        buffer_sec
+    )
+    unstable_knee = build_unstable_mask(
+        [
+            (dominant_hip_x, dominant_hip_y),
+            (dominant_knee_x, dominant_knee_y),
+            (dominant_ankle_x, dominant_ankle_y),
+        ],
+        times,
+        args.unstable_k,
+        buffer_sec
+    )
+    unstable_ankle = build_unstable_mask(
+        [
+            (dominant_knee_x, dominant_knee_y),
+            (dominant_ankle_x, dominant_ankle_y),
+            (dominant_heel_x, dominant_heel_y),
+            (dominant_foot_x, dominant_foot_y),
+        ],
+        times,
+        args.unstable_k,
+        buffer_sec
+    )
+
+    stable_mask = ~unstable_mask
+    ankle_stable_mask = ~unstable_ankle
+    heel_window, heel_cv, smooth_heel_y = select_smoothing_window(
+        dominant_heel_y,
+        times,
+        stable_mask,
+        max_window=100,
+        cv_threshold=0.3,
+        min_window=5
+    )
+    ankle_window, ankle_cv, smooth_ankle_y = select_smoothing_window(
+        dominant_ankle_y,
+        times,
+        ankle_stable_mask,
+        max_window=100,
+        cv_threshold=0.3,
+        min_window=5
+    )
+    foot_window, foot_cv, smooth_foot_y = select_smoothing_window(
+        dominant_foot_y,
+        times,
+        stable_mask,
+        max_window=100,
+        cv_threshold=0.3,
+        min_window=5
+    )
+    if smooth_heel_y.size > times.size:
+        smooth_heel_y = smooth_heel_y[: times.size]
+    if smooth_ankle_y.size > times.size:
+        smooth_ankle_y = smooth_ankle_y[: times.size]
+    if smooth_foot_y.size > times.size:
+        smooth_foot_y = smooth_foot_y[: times.size]
+    heel_stable_mask = stable_mask & (dominant_heel_x >= 0) & (dominant_heel_y >= 0)
+    ankle_stable_mask = ankle_stable_mask & (dominant_ankle_x >= 0) & (dominant_ankle_y >= 0)
+
+    heel_peak_idx, heel_contact_idx, heel_prom = find_contacts_with_fallback(
+        smooth_heel_y,
+        times,
+        heel_stable_mask,
+        min_interval_sec=0.2,
+        peak_prominence=args.peak_prominence,
+        peak_window=args.peak_window
+    )
+    ankle_peak_idx, ankle_contact_idx, ankle_prom = find_contacts_with_fallback(
+        smooth_ankle_y,
+        times,
+        ankle_stable_mask,
+        min_interval_sec=0.2,
+        peak_prominence=args.peak_prominence,
+        peak_window=args.peak_window
+    )
+
+    ankle_fallback_idx = []
+    for i in ankle_contact_idx:
+        t = times[i]
+        if not any(abs(times[h] - t) <= 0.05 for h in heel_contact_idx):
+            ankle_fallback_idx.append(i)
+
+    stable_hip_to_knee = hip_to_knee[stable_mask]
+    stable_knee_to_ankle = knee_to_ankle[ankle_stable_mask]
+
+    print(
+        f"優位側({dominant_label})の距離: 腰→膝 mean={hip_to_knee.mean():.4f}, median={np.median(hip_to_knee):.4f} | "
+        f"膝→足首 mean={knee_to_ankle.mean():.4f}, median={np.median(knee_to_ankle):.4f}"
+    )
+    if stable_hip_to_knee.size == 0 or stable_knee_to_ankle.size == 0:
+        print("安定区間が不足しているため、安定区間の距離統計を計算できません。")
+    else:
+        print(
+            f"安定区間の距離: 腰→膝 mean={stable_hip_to_knee.mean():.4f}, "
+            f"median={np.median(stable_hip_to_knee):.4f} | "
+            f"膝→足首 mean={stable_knee_to_ankle.mean():.4f}, "
+            f"median={np.median(stable_knee_to_ankle):.4f}"
+        )
+    print(f"トラッキング不安定フレーム率: {unstable_ratio:.1f}%")
+    print(
+        f"接地検出: 踵={len(heel_contact_idx)}件, 足首(補完)={len(ankle_fallback_idx)}件"
+    )
+    heel_cv_text = f"{heel_cv:.3f}" if heel_cv is not None else "n/a"
+    ankle_cv_text = f"{ankle_cv:.3f}" if ankle_cv is not None else "n/a"
+    foot_cv_text = f"{foot_cv:.3f}" if foot_cv is not None else "n/a"
+    print(
+        f"平滑化ウィンドウ: 踵={heel_window} (cv={heel_cv_text}), "
+        f"足首={ankle_window} (cv={ankle_cv_text}), "
+        f"つま先={foot_window} (cv={foot_cv_text})"
+    )
+    print(
+        f"ピーク判定プロミネンス: 踵={heel_prom:.4f}, 足首={ankle_prom:.4f}"
+    )
+
+    per_joint_rates = summarize_unstable_rates(
+        {"hip": speed_hip, "knee": speed_knee, "ankle": speed_ankle},
+        k=args.unstable_k
+    )
+    worst_joint = max(per_joint_rates, key=per_joint_rates.get)
+    print(
+        "関節別の不安定率(%): "
+        + ", ".join(f"{k}={v:.1f}" for k, v in per_joint_rates.items())
+        + f" | 最も不安定: {worst_joint}"
+    )
+
     # --- グラフ描画 ---
     sns.set_theme(style="whitegrid")
     font_family = os.environ.get("PLOT_FONT_FAMILY", "Noto Sans CJK JP")
     plt.rcParams['font.family'] = font_family
 
-    fig, axes = plt.subplots(5, 1, figsize=(12, 18), sharex=True)
+    fig, axes = plt.subplots(6, 1, figsize=(12, 21), sharex=True)
 
     dominant_style = '-'
     nondominant_style = ':'
@@ -390,13 +720,90 @@ for item in csv_list:
         alpha=0.7,
         linestyle=':'
     )
+    sns.lineplot(
+        ax=axes[3],
+        data=df,
+        x=time_col,
+        y=f'{dominant_side}_ankle_y',
+        label=f'{dominant_label} 足首高さ',
+        color=dominant_color,
+        alpha=0.7,
+        linestyle='--'
+    )
     axes[3].set_title('つま先/踵の上下動（優位側）', fontsize=14)
     axes[3].set_ylabel('高さ (Y座標)', fontsize=12)
     axes[3].legend(loc='upper right')
 
-    # 5. 視線角度（耳→目） + 上半身の傾き（腰→肩） + 頭の傾き（肩→耳）
+    # 5. 平滑化した高さ + 接地/ピーク
     sns.lineplot(
         ax=axes[4],
+        x=times,
+        y=smooth_heel_y,
+        label=f'{dominant_label} 踵高さ(平滑化)',
+        color=dominant_color,
+        alpha=0.8
+    )
+    sns.lineplot(
+        ax=axes[4],
+        x=times,
+        y=smooth_foot_y,
+        label=f'{dominant_label} つま先高さ(平滑化)',
+        color=dominant_color,
+        alpha=0.8,
+        linestyle=':'
+    )
+    sns.lineplot(
+        ax=axes[4],
+        x=times,
+        y=smooth_ankle_y,
+        label=f'{dominant_label} 足首高さ(平滑化)',
+        color=dominant_color,
+        alpha=0.8,
+        linestyle='--'
+    )
+    if heel_contact_idx:
+        axes[4].scatter(
+            times[heel_contact_idx],
+            smooth_heel_y[heel_contact_idx],
+            s=30,
+            color='black',
+            marker='o',
+            label=f'{dominant_label} 踵接地'
+        )
+    if heel_peak_idx:
+        axes[4].scatter(
+            times[heel_peak_idx],
+            smooth_heel_y[heel_peak_idx],
+            s=20,
+            color='gray',
+            marker='^',
+            label=f'{dominant_label} 踵遊脚ピーク'
+        )
+    if ankle_fallback_idx:
+        axes[4].scatter(
+            times[ankle_fallback_idx],
+            smooth_ankle_y[ankle_fallback_idx],
+            s=30,
+            color='black',
+            marker='x',
+            label=f'{dominant_label} 足首接地(補完)'
+        )
+    if ankle_peak_idx:
+        axes[4].scatter(
+            times[ankle_peak_idx],
+            smooth_ankle_y[ankle_peak_idx],
+            s=20,
+            color='gray',
+            marker='^',
+            label=f'{dominant_label} 足首遊脚ピーク'
+        )
+    axes[4].set_title('踵/足首の上下動（平滑化）と接地/ピーク', fontsize=14)
+    axes[4].set_ylabel('高さ (Y座標)', fontsize=12)
+    axes[4].legend(loc='upper right')
+
+    # 6. 視線角度（耳→目） + 上半身の傾き（腰→肩） + 頭の傾き（肩→耳）
+    sns.lineplot(
+        ax=axes[5],
         data=df,
         x=time_col,
         y='dominant_gaze_angle',
@@ -405,7 +812,7 @@ for item in csv_list:
         linewidth=2
     )
     sns.lineplot(
-        ax=axes[4],
+        ax=axes[5],
         data=df,
         x=time_col,
         y='dominant_head_posture_angle',
@@ -415,7 +822,7 @@ for item in csv_list:
         linestyle='--'
     )
     sns.lineplot(
-        ax=axes[4],
+        ax=axes[5],
         data=df,
         x=time_col,
         y='dominant_head_tilt_angle',
@@ -424,11 +831,25 @@ for item in csv_list:
         linewidth=2,
         linestyle=':'
     )
-    axes[4].set_title('視線角度/上半身の傾き（画像座標）', fontsize=14)
-    axes[4].axhline(0, color='gray', linestyle=':', alpha=0.5)
-    axes[4].set_xlabel('時間 (秒)', fontsize=12)
-    axes[4].set_ylabel('角度 (度)', fontsize=12)
-    axes[4].legend(loc='upper right')
+    axes[5].set_title('視線角度/上半身の傾き（画像座標）', fontsize=14)
+    axes[5].axhline(0, color='gray', linestyle=':', alpha=0.5)
+    axes[5].set_xlabel('時間 (秒)', fontsize=12)
+    axes[5].set_ylabel('角度 (度)', fontsize=12)
+    axes[5].legend(loc='upper right')
+
+    unstable_segments_map = {
+        0: mask_to_segments(times, unstable_hip),
+        1: mask_to_segments(times, unstable_knee),
+        2: mask_to_segments(times, unstable_ankle),
+        3: mask_to_segments(times, unstable_ankle),
+        4: mask_to_segments(times, unstable_ankle),
+        5: mask_to_segments(times, unstable_hip),
+    }
+    for idx, segments in unstable_segments_map.items():
+        if not segments:
+            continue
+        for start_t, end_t in segments:
+            axes[idx].axvspan(start_t, end_t, color='gray', alpha=0.15)
 
     display_start = args.start_sec if args.start_sec is not None else item["display_start_sec"]
     display_end = args.end_sec if args.end_sec is not None else item["display_end_sec"]
@@ -460,18 +881,26 @@ for item in csv_list:
                 axes[3],
                 pd.concat([
                     df_range[f'{dominant_side}_heel_y'],
-                    df_range[f'{dominant_side}_foot_index_y']
+                    df_range[f'{dominant_side}_foot_index_y'],
+                    df_range[f'{dominant_side}_ankle_y']
                 ])
             )
             set_ylim(
                 axes[4],
+                pd.concat([
+                    pd.Series(smooth_heel_y, index=df.index)[mask],
+                    pd.Series(smooth_ankle_y, index=df.index)[mask]
+                ])
+            )
+            set_ylim(
+                axes[5],
                 pd.concat([
                     df_range['dominant_gaze_angle'],
                     df_range['dominant_head_posture_angle'],
                     df_range['dominant_head_tilt_angle']
                 ])
             )
-            ymin, ymax = axes[4].get_ylim()
+            ymin, ymax = axes[5].get_ylim()
             if ymin > 0:
                 ymin = 0
             if ymax < 0:
@@ -480,9 +909,10 @@ for item in csv_list:
                 ymin -= 1
             if ymax == 0:
                 ymax += 1
-            axes[4].set_ylim(ymin, ymax)
+            axes[5].set_ylim(ymin, ymax)
 
     axes[3].invert_yaxis()
+    axes[4].invert_yaxis()
 
     plt.tight_layout()
 
