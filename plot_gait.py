@@ -63,6 +63,33 @@ def calculate_horizontal_signed_angle_deg(x1, y1, x2, y2):
     dy = y2 - y1
     return -np.degrees(np.arctan2(dy, np.abs(dx)))
 
+def calculate_head_posture_angle_deg(x1, y1, x2, y2, is_moving_right):
+    dx = x2 - x1
+    dy = y2 - y1
+    angle_from_up = np.degrees(np.arctan2(dx, -dy))
+    if is_moving_right:
+        return -angle_from_up
+    return angle_from_up
+
+def calculate_head_tilt_relative_deg(
+    torso_ax, torso_ay, torso_bx, torso_by,
+    head_cx, head_cy, head_dx, head_dy,
+    is_moving_right
+):
+    v1x, v1y = torso_bx - torso_ax, torso_by - torso_ay
+    v2x, v2y = head_dx - head_cx, head_dy - head_cy
+    dot = v1x * v2x + v1y * v2y
+    mag1 = np.hypot(v1x, v1y)
+    mag2 = np.hypot(v2x, v2y)
+    denom = mag1 * mag2
+    cos_val = np.divide(dot, denom, out=np.zeros_like(dot), where=denom != 0)
+    cos_val = np.clip(cos_val, -1.0, 1.0)
+    unsigned = np.degrees(np.arccos(cos_val))
+    forward_x = 1.0 if is_moving_right else -1.0
+    forward_dot = v2x * forward_x
+    signed = np.where(forward_dot > 0, -unsigned, unsigned)
+    return np.where(denom == 0, 0.0, signed)
+
 def calculate_line_angle_deg(ax, ay, bx, by, cx, cy, dx, dy):
     v1x, v1y = bx - ax, by - ay
     v2x, v2y = dx - cx, dy - cy
@@ -220,11 +247,23 @@ for item in csv_list:
             df[f'{dominant_side}_eye_x'].to_numpy(),
             df[f'{dominant_side}_eye_y'].to_numpy()
         )
-        df['dominant_head_posture_angle'] = calculate_vector_angle_deg(
+        df['dominant_head_posture_angle'] = calculate_head_posture_angle_deg(
+            df[f'{dominant_side}_hip_x'].to_numpy(),
+            df[f'{dominant_side}_hip_y'].to_numpy(),
+            df[f'{dominant_side}_shoulder_x'].to_numpy(),
+            df[f'{dominant_side}_shoulder_y'].to_numpy(),
+            is_moving_right
+        )
+        df['dominant_head_tilt_angle'] = calculate_head_tilt_relative_deg(
+            df[f'{dominant_side}_hip_x'].to_numpy(),
+            df[f'{dominant_side}_hip_y'].to_numpy(),
+            df[f'{dominant_side}_shoulder_x'].to_numpy(),
+            df[f'{dominant_side}_shoulder_y'].to_numpy(),
             df[f'{dominant_side}_shoulder_x'].to_numpy(),
             df[f'{dominant_side}_shoulder_y'].to_numpy(),
             df[f'{dominant_side}_ear_x'].to_numpy(),
-            df[f'{dominant_side}_ear_y'].to_numpy()
+            df[f'{dominant_side}_ear_y'].to_numpy(),
+            is_moving_right
         )
 
     except KeyError as e:
@@ -352,7 +391,7 @@ for item in csv_list:
     axes[3].set_ylabel('高さ (Y座標)', fontsize=12)
     axes[3].legend(loc='upper right')
 
-    # 5. 視線角度（耳→目） + 頭の起き具合（肩→耳）
+    # 5. 視線角度（耳→目） + 上半身の傾き（腰→肩） + 頭の傾き（肩→耳）
     sns.lineplot(
         ax=axes[4],
         data=df,
@@ -367,12 +406,22 @@ for item in csv_list:
         data=df,
         x=time_col,
         y='dominant_head_posture_angle',
-        label=f'{dominant_label} 頭の起き具合(肩→耳)',
+        label=f'{dominant_label} 上半身の傾き(腰→肩)',
+        color=dominant_color,
+        linewidth=2,
+        linestyle='--'
+    )
+    sns.lineplot(
+        ax=axes[4],
+        data=df,
+        x=time_col,
+        y='dominant_head_tilt_angle',
+        label=f'{dominant_label} 頭の角度(体幹相対)',
         color=dominant_color,
         linewidth=2,
         linestyle=':'
     )
-    axes[4].set_title('視線角度/頭の起き具合（画像座標）', fontsize=14)
+    axes[4].set_title('視線角度/上半身の傾き（画像座標）', fontsize=14)
     axes[4].axhline(0, color='gray', linestyle=':', alpha=0.5)
     axes[4].set_xlabel('時間 (秒)', fontsize=12)
     axes[4].set_ylabel('角度 (度)', fontsize=12)
@@ -413,7 +462,11 @@ for item in csv_list:
             )
             set_ylim(
                 axes[4],
-                pd.concat([df_range['dominant_gaze_angle'], df_range['dominant_head_posture_angle']])
+                pd.concat([
+                    df_range['dominant_gaze_angle'],
+                    df_range['dominant_head_posture_angle'],
+                    df_range['dominant_head_tilt_angle']
+                ])
             )
             ymin, ymax = axes[4].get_ylim()
             if ymin > 0:
