@@ -198,6 +198,7 @@ for item in csv_list:
             df['left_knee_x'].to_numpy(), df['left_knee_y'].to_numpy(),
             is_moving_right
         )
+        df['left_hip_angle'] = (df['left_hip_angle'] - 180.0) * -1.0
 
         df['right_hip_angle'] = calculate_hip_angle_inverted_vec(
             df['right_shoulder_x'].to_numpy(), df['right_shoulder_y'].to_numpy(),
@@ -205,18 +206,21 @@ for item in csv_list:
             df['right_knee_x'].to_numpy(), df['right_knee_y'].to_numpy(),
             is_moving_right
         )
+        df['right_hip_angle'] = (df['right_hip_angle'] - 180.0) * -1.0
 
         df['left_knee_angle'] = calculate_knee_angle_vec(
             df['left_hip_x'].to_numpy(), df['left_hip_y'].to_numpy(),
             df['left_knee_x'].to_numpy(), df['left_knee_y'].to_numpy(),
             df['left_ankle_x'].to_numpy(), df['left_ankle_y'].to_numpy()
         )
+        df['left_knee_angle'] = (df['left_knee_angle'] - 180.0) * -1.0
 
         df['right_knee_angle'] = calculate_knee_angle_vec(
             df['right_hip_x'].to_numpy(), df['right_hip_y'].to_numpy(),
             df['right_knee_x'].to_numpy(), df['right_knee_y'].to_numpy(),
             df['right_ankle_x'].to_numpy(), df['right_ankle_y'].to_numpy()
         )
+        df['right_knee_angle'] = (df['right_knee_angle'] - 180.0) * -1.0
 
     except KeyError as e:
         print(f"エラー: データ列 {e} が不足しています。")
@@ -236,6 +240,8 @@ for item in csv_list:
             df['right_heel_x'].to_numpy(), df['right_heel_y'].to_numpy(),
             df['right_foot_index_x'].to_numpy(), df['right_foot_index_y'].to_numpy()
         )
+        df['left_ankle_angle'] = df['left_ankle_angle'] - 90.0
+        df['right_ankle_angle'] = df['right_ankle_angle'] - 90.0
 
         dominant_side = "right" if is_moving_right else "left"
         dominant_label = "右" if is_moving_right else "左"
@@ -303,13 +309,11 @@ for item in csv_list:
         linewidth=2,
         linestyle=right_style
     )
-    axes[0].set_title('股関節の角度 (数値大=伸展/後, 数値小=屈曲/前)', fontsize=14) # タイトル変更
-    axes[0].axhline(180, color='gray', linestyle=':', alpha=0.8, label='直立ライン')
+    axes[0].set_title('股関節の角度 (プラス=屈曲/前, マイナス=伸展/後)', fontsize=14)
+    axes[0].axhline(0, color='black', linestyle='-', alpha=0.8, label='中立ライン', linewidth=1.5)
     axes[0].set_ylabel('角度 (度)', fontsize=12)
 
-    # Y軸の範囲を調整（値の分布が変わるため）
-    # 屈曲=180以下、伸展=180以上になるので、130〜210程度を表示
-    axes[0].set_ylim(130, 210)
+    axes[0].set_ylim(-60, 60)
     axes[0].legend(loc='upper right')
 
     # 2. 膝関節
@@ -333,10 +337,10 @@ for item in csv_list:
         linewidth=2,
         linestyle=right_style
     )
-    axes[1].set_title('膝関節の角度 (180=伸展, 小さい=屈曲)', fontsize=14)
-    axes[1].axhline(180, color='gray', linestyle=':', alpha=0.5)
+    axes[1].set_title('膝関節の角度 (プラス=屈曲, マイナス=伸展)', fontsize=14)
+    axes[1].axhline(0, color='black', linestyle='-', alpha=0.8, linewidth=1.5)
     axes[1].set_ylabel('角度 (度)', fontsize=12)
-    axes[1].set_ylim(60, 190)
+    axes[1].set_ylim(-120, 20)
     axes[1].legend(loc='upper right')
 
     # 3. 足関節
@@ -360,11 +364,10 @@ for item in csv_list:
         linewidth=2,
         linestyle=right_style
     )
-    axes[2].set_title('足関節の角度 (180=伸展, 小さい=屈曲)', fontsize=14)
-    axes[2].axhline(180, color='gray', linestyle=':', alpha=0.5)
-    axes[2].axhline(90, color='gray', linestyle=':', alpha=0.5)
+    axes[2].set_title('足関節の角度 (プラス=背屈, マイナス=底屈)', fontsize=14)
+    axes[2].axhline(0, color='black', linestyle='-', alpha=0.8, linewidth=1.5)
     axes[2].set_ylabel('角度 (度)', fontsize=12)
-    axes[2].set_ylim(60, 190)
+    axes[2].set_ylim(-90, 90)
     axes[2].legend(loc='upper right')
 
     # 4. つま先/踵の高さ（優位側）
