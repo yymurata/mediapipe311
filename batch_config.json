@@ -3,6 +3,8 @@
         "input_video": "/data/mp4/20251128_fast.mp4",
         "start_sec": 8,
         "end_sec": 35,
+        "analysis_start_sec": 13,
+        "analysis_end_sec": 32,
         "display_start_sec": 13,
         "display_end_sec": 32
     },

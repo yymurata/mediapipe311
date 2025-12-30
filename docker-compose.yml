@@ -1,18 +1,12 @@
 services:
-  mmpose-dev:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: mmpose311-dev
-    container_name: mmpose311-dev
+  mediapipe311:
+    image: mediapipe311
+    container_name: mediapipe311
     working_dir: /workspace
     volumes:
       - .:/workspace:cached
-      # Host mp4 folder: set MP4_DIR to change it per run
-      - "${MP4_DIR:-C:/Python/mmpose/mp4}:/data/mp4"
-      # Host output folder: set OUTPUT_DIR to change it per run
-      - "${OUTPUT_DIR:-C:/Python/mmpose/output}:/output"
-      - pip-cache:/home/devuser/.cache/pip
+      - "${MP4_DIR:-./mp4}:/data/mp4"
+      - "${OUTPUT_DIR:-./output}:/output"
     environment:
       - PYTHONDONTWRITEBYTECODE=1
       - PYTHONUNBUFFERED=1
@@ -22,6 +16,3 @@ services:
     stdin_open: true
     tty: true
     command: ["sleep", "infinity"]
-
-volumes:
-  pip-cache:

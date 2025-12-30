@@ -162,14 +162,30 @@ def mask_to_segments(times, mask):
         segments.append((start_t, times[-1]))
     return segments
 
-def select_smoothing_window(values, times, stable_mask, max_window=11, cv_threshold=0.3, min_window=5):
+def select_smoothing_window(
+    values,
+    times,
+    stable_mask,
+    peak_window,
+    peak_prominence,
+    max_window=11,
+    cv_threshold=0.3,
+    min_window=5
+):
     best_window = min_window
     best_cv = None
     best_smooth = smooth_series(values, window=best_window)
 
     for window in range(min_window, max_window + 1, 2):
         smooth_vals = smooth_series(values, window=window)
-        peak_idx, _ = find_contacts_between_peaks(smooth_vals, times, stable_mask, min_interval_sec=0.2)
+        peak_idx, _ = find_contacts_between_peaks(
+            smooth_vals,
+            times,
+            stable_mask,
+            min_interval_sec=0.2,
+            peak_prominence=peak_prominence,
+            peak_window=peak_window
+        )
         if len(peak_idx) < 3:
             continue
         intervals = np.diff(times[peak_idx])
@@ -185,6 +201,364 @@ def select_smoothing_window(values, times, stable_mask, max_window=11, cv_thresh
     if best_cv is None or best_cv <= cv_threshold:
         return best_window, best_cv, best_smooth
     return best_window, best_cv, best_smooth
+
+def build_peak_window_candidates(times, default_window):
+    if times.size < 3:
+        return [default_window]
+    dt = np.median(np.diff(times))
+    if dt <= 0:
+        return [default_window]
+    min_sec = 0.15
+    max_sec = 1.2
+    min_window = max(5, int(round(min_sec / dt)))
+    max_window = max(min_window, int(round(max_sec / dt)))
+    max_window = min(max_window, 101)
+    if min_window % 2 == 0:
+        min_window += 1
+    if max_window % 2 == 0:
+        max_window -= 1
+    if max_window < min_window:
+        return [default_window]
+    return list(range(min_window, max_window + 1, 2))
+
+def interval_cv_for_peaks(values, times, mask, peak_window, peak_prominence):
+    peak_max = find_local_extrema(
+        values, times, mask,
+        min_interval_sec=0.2,
+        peak_prominence=peak_prominence,
+        peak_window=peak_window,
+        find_max=True
+    )
+    peak_min = find_local_extrema(
+        values, times, mask,
+        min_interval_sec=0.2,
+        peak_prominence=peak_prominence,
+        peak_window=peak_window,
+        find_max=False
+    )
+    best_peaks = peak_max
+    intervals = np.diff(times[best_peaks]) if len(best_peaks) >= 2 else np.array([])
+    best_cv = None
+    if intervals.size >= 2:
+        mean = intervals.mean()
+        best_cv = intervals.std() / mean if mean != 0 else None
+    alt_intervals = np.diff(times[peak_min]) if len(peak_min) >= 2 else np.array([])
+    if alt_intervals.size >= 2:
+        mean = alt_intervals.mean()
+        alt_cv = alt_intervals.std() / mean if mean != 0 else None
+        if best_cv is None or (alt_cv is not None and alt_cv < best_cv):
+            best_cv = alt_cv
+    return best_cv
+
+def select_peak_window(series_list, times, peak_prominence, default_window):
+    candidates = build_peak_window_candidates(times, default_window)
+    best_window = default_window
+    best_cv = None
+    for window in candidates:
+        cvs = []
+        for values, mask in series_list:
+            cv = interval_cv_for_peaks(values, times, mask, window, peak_prominence)
+            if cv is not None:
+                cvs.append(cv)
+        if not cvs:
+            continue
+        median_cv = float(np.median(cvs))
+        if best_cv is None or median_cv < best_cv:
+            best_cv = median_cv
+            best_window = window
+    return best_window, candidates, best_cv
+
+def select_period_smoothing_window(
+    series_list,
+    times,
+    peak_window,
+    min_window=5,
+    max_window=21
+):
+    candidates = list(range(min_window, max_window + 1, 2))
+    best_window = min_window
+    best_cv = None
+    for window in candidates:
+        cvs = []
+        for values, mask, prominence in series_list:
+            smooth_vals = smooth_series(values, window=window)
+            cv = interval_cv_for_peaks(smooth_vals, times, mask, peak_window, prominence)
+            if cv is not None:
+                cvs.append(cv)
+        if not cvs:
+            continue
+        median_cv = float(np.median(cvs))
+        if best_cv is None or median_cv < best_cv:
+            best_cv = median_cv
+            best_window = window
+    return best_window, candidates, best_cv
+
+def estimate_period_autocorr(values, times, min_period_sec=0.3, max_period_sec=3.0):
+    if values.size < 3:
+        return None, None
+    dt = np.median(np.diff(times))
+    if dt <= 0:
+        return None, None
+    min_lag = max(1, int(round(min_period_sec / dt)))
+    max_lag = int(round(max_period_sec / dt))
+    max_lag = min(max_lag, values.size - 1)
+    if max_lag <= min_lag:
+        return None, None
+
+    centered = values - np.mean(values)
+    denom = np.dot(centered, centered)
+    if denom == 0:
+        return None, None
+    corr_full = np.correlate(centered, centered, mode="full")
+    corr = corr_full[corr_full.size // 2 :] / denom
+    segment = corr[min_lag : max_lag + 1]
+    if segment.size < 3:
+        return None, None
+
+    peaks = []
+    for i in range(1, segment.size - 1):
+        if segment[i] >= segment[i - 1] and segment[i] >= segment[i + 1]:
+            peaks.append(i)
+    if not peaks:
+        return None, None
+    best = max(peaks, key=lambda idx: segment[idx])
+    lag = min_lag + best
+    return lag * dt, float(segment[best])
+
+def estimate_period_fft(values, times, min_period_sec=0.3, max_period_sec=3.0):
+    if values.size < 3:
+        return None, None
+    dt = np.median(np.diff(times))
+    if dt <= 0:
+        return None, None
+    centered = values - np.mean(values)
+    window = np.hanning(centered.size)
+    windowed = centered * window
+    spectrum = np.fft.rfft(windowed)
+    freqs = np.fft.rfftfreq(windowed.size, d=dt)
+    power = np.abs(spectrum) ** 2
+
+    min_freq = 1.0 / max_period_sec
+    max_freq = 1.0 / min_period_sec
+    valid = (freqs >= min_freq) & (freqs <= max_freq)
+    if not np.any(valid):
+        return None, None
+    idx = np.argmax(power[valid])
+    peak_freq = freqs[valid][idx]
+    peak_power = power[valid][idx]
+    if peak_freq <= 0:
+        return None, None
+    return 1.0 / peak_freq, float(peak_power)
+
+def apply_bandpass_fft(values, times, baseline_period, bandwidth=0.3):
+    if values.size < 3 or baseline_period is None:
+        return values
+    if not np.isfinite(values).all():
+        idx = np.arange(values.size)
+        valid = np.isfinite(values)
+        if valid.sum() < 2:
+            return values
+        values = np.interp(idx, idx[valid], values[valid])
+    if os.environ.get("BANDPASS_DEBUG", "") == "1":
+        print(
+            f"bandpass input: min={np.nanmin(values):.4f}, "
+            f"max={np.nanmax(values):.4f}, "
+            f"nan={np.isnan(values).sum()}"
+        )
+    dt = np.median(np.diff(times))
+    if dt <= 0:
+        return values
+    center = 1.0 / baseline_period
+    low = center / (1.0 + bandwidth)
+    high = center / (1.0 - bandwidth)
+    if low <= 0 or high <= 0:
+        return values
+    fft = np.fft.rfft(values)
+    freqs = np.fft.rfftfreq(values.size, d=dt)
+    mask = (freqs >= low) & (freqs <= high)
+    filtered = np.zeros_like(fft)
+    filtered[mask] = fft[mask]
+    output = np.fft.irfft(filtered, n=values.size)
+    if os.environ.get("BANDPASS_DEBUG", "") == "1":
+        print(
+            f"bandpass output: min={np.nanmin(output):.4f}, "
+            f"max={np.nanmax(output):.4f}, "
+            f"nan={np.isnan(output).sum()}"
+        )
+    return output
+
+def score_peak_params(values, times, mask, peak_window, peak_prominence, baseline_range):
+    peaks = find_local_extrema(
+        values, times, mask,
+        min_interval_sec=0.2,
+        peak_prominence=peak_prominence,
+        peak_window=peak_window,
+        find_max=True
+    )
+    if len(peaks) < 2:
+        return None
+    intervals = np.diff(times[peaks])
+    total = intervals.size
+    if total == 0:
+        return None
+    lo, hi = baseline_range
+    in_range = intervals[(intervals >= lo) & (intervals <= hi)]
+    if in_range.size == 0:
+        return None
+    mean = in_range.mean()
+    cv = in_range.std() / mean if mean != 0 else None
+    ratio = in_range.size / total
+    return {
+        "peaks": len(peaks),
+        "ratio": ratio,
+        "count": in_range.size,
+        "cv": cv if cv is not None else float("inf"),
+    }
+
+def score_valley_params(values, times, mask, peak_window, peak_prominence, baseline_range, find_max=False):
+    valleys = find_local_extrema(
+        values, times, mask,
+        min_interval_sec=0.2,
+        peak_prominence=peak_prominence,
+        peak_window=peak_window,
+        find_max=find_max
+    )
+    if len(valleys) < 2:
+        return None
+    intervals = np.diff(times[valleys])
+    total = intervals.size
+    if total == 0:
+        return None
+    lo, hi = baseline_range
+    in_range = intervals[(intervals >= lo) & (intervals <= hi)]
+    if in_range.size == 0:
+        return None
+    mean = in_range.mean()
+    cv = in_range.std() / mean if mean != 0 else None
+    ratio = in_range.size / total
+    return {
+        "peaks": len(valleys),
+        "ratio": ratio,
+        "count": in_range.size,
+        "cv": cv if cv is not None else float("inf"),
+    }
+
+def select_toe_peak_params(
+    values,
+    times,
+    mask,
+    baseline_range,
+    default_peak_window,
+    default_prominence,
+    prominences=None,
+    min_window=5,
+    max_window=21
+):
+    window_candidates = list(range(min_window, max_window + 1, 2))
+    peak_windows = build_peak_window_candidates(times, default_peak_window)
+    if prominences is None:
+        prominences = [default_prominence, default_prominence * 0.5, default_prominence * 0.25]
+    best = None
+    best_params = None
+    for smooth_w in window_candidates:
+        smooth_vals = smooth_series(values, window=smooth_w)
+        for peak_w in peak_windows:
+            for prom in prominences:
+                score = score_peak_params(smooth_vals, times, mask, peak_w, prom, baseline_range)
+                if score is None:
+                    continue
+                candidate = (score["count"], score["ratio"], -score["cv"])
+                if best is None or candidate > best:
+                    best = candidate
+                    best_params = {
+                        "smooth_window": smooth_w,
+                        "peak_window": peak_w,
+                        "prominence": prom,
+                        "score": score,
+                        "smooth_vals": smooth_vals,
+                    }
+    return best_params
+
+def select_heel_valley_params(
+    values,
+    times,
+    mask,
+    baseline_range,
+    default_peak_window,
+    default_prominence,
+    min_window=5,
+    max_window=21
+):
+    window_candidates = list(range(min_window, max_window + 1, 2))
+    peak_windows = build_peak_window_candidates(times, default_peak_window)
+    prominences = [default_prominence, default_prominence * 0.5, default_prominence * 0.25]
+    best = None
+    best_params = None
+    for smooth_w in window_candidates:
+        smooth_vals = smooth_series(values, window=smooth_w)
+        for peak_w in peak_windows:
+            for prom in prominences:
+                score = score_valley_params(smooth_vals, times, mask, peak_w, prom, baseline_range, find_max=True)
+                if score is None:
+                    continue
+                candidate = (score["count"], score["ratio"], -score["cv"])
+                if best is None or candidate > best:
+                    best = candidate
+                    best_params = {
+                        "smooth_window": smooth_w,
+                        "peak_window": peak_w,
+                        "prominence": prom,
+                        "score": score,
+                        "smooth_vals": smooth_vals,
+                    }
+    return best_params
+
+def recompute_valleys_between_peaks(values, peak_idx, stable_mask):
+    valleys = []
+    if len(peak_idx) < 2:
+        return valleys
+    for start, end in zip(peak_idx, peak_idx[1:]):
+        segment = np.arange(start, end + 1)
+        segment = segment[stable_mask[segment]]
+        if segment.size == 0:
+            continue
+        valleys.append(int(segment[np.argmax(values[segment])]))
+    return valleys
+
+def prune_peaks_by_min_interval(peak_idx, times, baseline_range):
+    if len(peak_idx) < 2 or baseline_range is None:
+        return peak_idx, 0
+    lo, hi = baseline_range
+    center = (lo + hi) / 2.0
+    peaks = list(sorted(set(int(i) for i in peak_idx)))
+    removed = 0
+
+    def score(peaks_list):
+        if len(peaks_list) < 2:
+            return 0, float("inf")
+        intervals = np.diff(times[peaks_list])
+        in_range = intervals[(intervals >= lo) & (intervals <= hi)]
+        count = in_range.size
+        dev = float(np.sum(np.abs(in_range - center))) if count else float("inf")
+        return count, dev
+
+    while len(peaks) >= 2:
+        intervals = np.diff(times[peaks])
+        short_idx = np.where(intervals < lo)[0]
+        if short_idx.size == 0:
+            break
+        i = int(short_idx[0])
+        cand_left = peaks[:i] + peaks[i + 1:]
+        cand_right = peaks[:i + 1] + peaks[i + 2:]
+        score_left = score(cand_left)
+        score_right = score(cand_right)
+        if score_left > score_right:
+            peaks = cand_left
+        else:
+            peaks = cand_right
+        removed += 1
+
+    return peaks, removed
 
 def find_contacts_between_peaks(
     values,
@@ -242,6 +616,119 @@ def find_contacts_with_fallback(
             return peak_idx, contact_idx, prom
     return [], [], 0.0
 
+def find_local_extrema(
+    values,
+    times,
+    stable_mask,
+    min_interval_sec,
+    peak_prominence,
+    peak_window,
+    find_max=True
+):
+    peak_idx = []
+    last_time = None
+    for i in range(1, len(values) - 1):
+        if not stable_mask[i]:
+            continue
+        if find_max:
+            is_peak = values[i] >= values[i - 1] and values[i] >= values[i + 1]
+        else:
+            is_peak = values[i] <= values[i - 1] and values[i] <= values[i + 1]
+        if not is_peak:
+            continue
+        start = max(0, i - peak_window)
+        end = min(len(values), i + peak_window + 1)
+        if find_max:
+            local_min = values[start:end].min()
+            prominence = values[i] - local_min
+        else:
+            local_max = values[start:end].max()
+            prominence = local_max - values[i]
+        if prominence < peak_prominence:
+            continue
+        if last_time is None or (times[i] - last_time) >= min_interval_sec:
+            peak_idx.append(i)
+            last_time = times[i]
+    return peak_idx
+
+def calculate_slope(values, times):
+    dt = np.diff(times)
+    dy = np.diff(values)
+    slope = np.divide(dy, dt, out=np.zeros_like(dy), where=dt != 0)
+    return np.concatenate([[0.0], slope])
+
+def filter_contacts_by_composite_conditions(
+    contact_idx,
+    toe_peak_idx,
+    toe_valley_idx,
+    heel_valley_idx,
+    toe_y,
+    heel_y,
+    times,
+    period_sec
+):
+    toe_peak_idx = np.array(toe_peak_idx, dtype=int)
+    toe_valley_idx = np.array(toe_valley_idx, dtype=int)
+    heel_valley_idx = np.array(heel_valley_idx, dtype=int)
+    kept = []
+    if toe_peak_idx.size == 0 or toe_valley_idx.size == 0 or heel_valley_idx.size == 0:
+        return kept, {}
+    if period_sec is None:
+        return kept, {}
+
+    for peak_pos, peak_i in enumerate(toe_peak_idx):
+        if peak_pos >= toe_valley_idx.size:
+            break
+        next_valleys = toe_valley_idx[toe_valley_idx > peak_i]
+        if next_valleys.size == 0:
+            continue
+        within_period = next_valleys[
+            (times[next_valleys] - times[peak_i]) <= period_sec
+        ]
+        if within_period.size == 0:
+            continue
+        toe_valley_i = within_period[0]
+
+        segment = np.arange(peak_i + 1, toe_valley_i + 1)
+        if segment.size == 0:
+            continue
+        heel_candidates = heel_valley_idx[
+            (heel_valley_idx >= segment[0]) & (heel_valley_idx <= segment[-1])
+        ]
+        if heel_candidates.size == 0:
+            continue
+        best_idx = int(heel_candidates[np.argmax(heel_y[heel_candidates])])
+        seg_times = times[segment]
+        seg_vals = heel_y[segment]
+        dt = np.diff(seg_times)
+        dy = np.diff(seg_vals)
+        slopes = np.divide(dy, dt, out=np.zeros_like(dy), where=dt != 0)
+        slopes = smooth_series(slopes, window=5) if slopes.size >= 5 else slopes
+        local_pos = np.where(segment == best_idx)[0]
+        if local_pos.size == 0 or local_pos[0] == 0:
+            kept.append(best_idx)
+            continue
+        valley_pos = int(local_pos[0])
+        pre_slopes = slopes[:valley_pos]
+        if pre_slopes.size == 0:
+            kept.append(best_idx)
+            continue
+        max_pos = int(np.argmax(pre_slopes))
+        decel_idx = None
+        for j in range(max_pos + 1, pre_slopes.size):
+            if pre_slopes[j] < pre_slopes[j - 1]:
+                decel_idx = segment[j]
+                break
+        if decel_idx is not None:
+            if decel_idx <= peak_i:
+                kept.append(int(peak_i))
+            else:
+                kept.append(int(decel_idx))
+        else:
+            kept.append(best_idx)
+
+    return kept, {}
+
 # === メイン処理 ===
 parser = argparse.ArgumentParser(description="CSVの歩行解析データを可視化します。")
 parser.add_argument("csv", nargs="?", default=os.environ.get("CSV_FILE", ""), help="入力CSVファイルパス")
@@ -260,7 +747,7 @@ parser.add_argument("--end-sec", type=float, default=None, help="表示終了秒
 parser.add_argument(
     "--unstable-k",
     type=float,
-    default=float(os.environ.get("UNSTABLE_K", "5.0")),
+    default=float(os.environ.get("UNSTABLE_K", "7.0")),
     help="不安定判定の閾値係数 (median + k * MAD)"
 )
 parser.add_argument(
@@ -281,6 +768,32 @@ parser.add_argument(
     default=int(os.environ.get("PEAK_WINDOW", "10")),
     help="ピーク判定の近傍ウィンドウ(フレーム)"
 )
+parser.add_argument(
+    "--no-composite-heel",
+    "--no-use-toe-for-heel",
+    action="store_false",
+    dest="use_composite_heel",
+    help="踵接地の複合条件を使わない"
+)
+parser.add_argument(
+    "--toe-after-sec",
+    type=float,
+    default=float(os.environ.get("TOE_AFTER_SEC", "0.4")),
+    help="つま先ピーク後に踵接地が起きる想定の最大時間(秒)"
+)
+parser.add_argument(
+    "--drop-window-sec",
+    type=float,
+    default=float(os.environ.get("DROP_WINDOW_SEC", "0.08")),
+    help="踵/足首の急降下を確認する時間幅(秒)"
+)
+parser.add_argument(
+    "--drop-quantile",
+    type=float,
+    default=float(os.environ.get("DROP_QUANTILE", "0.8")),
+    help="急降下のしきい値に使う分位点(大きいほど厳しい)"
+)
+parser.set_defaults(use_composite_heel=True)
 args = parser.parse_args()
 
 def csv_from_config(config, output_dir):
@@ -304,13 +817,17 @@ if args.batch_config:
         exit()
     csv_list = []
     for config in batch_list:
-        display_start = config.get("display_start_sec", config.get("start_sec"))
-        display_end = config.get("display_end_sec", config.get("end_sec"))
+        analysis_start = config.get("analysis_start_sec")
+        analysis_end = config.get("analysis_end_sec")
+        display_start = config.get("display_start_sec", analysis_start)
+        display_end = config.get("display_end_sec", analysis_end)
         csv_list.append(
             {
                 "csv_path": csv_from_config(config, args.output_dir),
                 "display_start_sec": display_start,
                 "display_end_sec": display_end,
+                "analysis_start_sec": analysis_start,
+                "analysis_end_sec": analysis_end,
             }
         )
 else:
@@ -330,6 +847,9 @@ for item in csv_list:
     if not os.path.exists(csv_path):
         print(f"エラー: {csv_path} が見つかりません。")
         continue
+    print("\n" + "=" * 60)
+    print(f"解析対象: {csv_path}")
+    print("=" * 60)
 
     df = pd.read_csv(csv_path)
     df.columns = [c.strip() for c in df.columns]
@@ -342,6 +862,23 @@ for item in csv_list:
         else:
             time_col = df.columns[0]
 
+    analysis_start = item.get("analysis_start_sec")
+    analysis_end = item.get("analysis_end_sec")
+    if analysis_start is not None or analysis_end is not None:
+        mask = pd.Series(True, index=df.index)
+        if analysis_start is not None:
+            mask &= df[time_col] >= analysis_start
+        if analysis_end is not None:
+            mask &= df[time_col] <= analysis_end
+        df = df[mask].reset_index(drop=True)
+        if df.empty:
+            print("エラー: 解析区間にデータがありません。")
+            continue
+        print(
+            f"解析区間: {analysis_start if analysis_start is not None else '-'}"
+            f" 〜 {analysis_end if analysis_end is not None else '-'}"
+        )
+
     # 進行方向判定
     start_x = df['left_hip_x'].iloc[0]
     end_x = df['left_hip_x'].iloc[-1]
@@ -350,11 +887,14 @@ for item in csv_list:
     if end_x < start_x:
         is_moving_right = False
         direction_text = "左(Left)"
+    print("== 進行方向判定 ==")
     print(f"判定: 被験者は【{direction_text}】に向かって歩いています。")
 
     # --- 角度計算（再反転版を使用） ---
+    print("== 関節角度計算 ==")
     print("関節角度（設定変更版）を計算中...")
 
+    print("== 追加特徴量計算 (足関節/視線/頭部) ==")
     try:
         df['left_hip_angle'] = calculate_hip_angle_inverted_vec(
             df['left_shoulder_x'].to_numpy(), df['left_shoulder_y'].to_numpy(),
@@ -456,6 +996,7 @@ for item in csv_list:
     hip_to_knee = np.hypot(dominant_hip_x - dominant_knee_x, dominant_hip_y - dominant_knee_y)
     knee_to_ankle = np.hypot(dominant_knee_x - dominant_ankle_x, dominant_knee_y - dominant_ankle_y)
 
+    print("== 不安定区間の判定 ==")
     times = df[time_col].to_numpy()
     buffer_sec = args.unstable_buffer_ms / 1000.0
     speed_hip = np.hypot(np.diff(dominant_hip_x), np.diff(dominant_hip_y))
@@ -505,12 +1046,40 @@ for item in csv_list:
         buffer_sec
     )
 
+    print("== 平滑化/ピーク検出パラメータ選定 ==")
     stable_mask = ~unstable_mask
-    ankle_stable_mask = ~unstable_ankle
+    heel_stable_mask = stable_mask & (dominant_heel_x >= 0) & (dominant_heel_y >= 0)
+    ankle_stable_mask = (~unstable_ankle) & (dominant_ankle_x >= 0) & (dominant_ankle_y >= 0)
+    toe_stable_mask = stable_mask & (dominant_foot_x >= 0) & (dominant_foot_y >= 0)
+
+    knee_values = df[f"{dominant_side}_knee_angle"].to_numpy()
+    pre_smooth_window = 5
+    peak_window, peak_candidates, peak_cv = select_peak_window(
+        [
+            (smooth_series(dominant_heel_y, window=pre_smooth_window), heel_stable_mask),
+            (smooth_series(dominant_foot_y, window=pre_smooth_window), toe_stable_mask),
+            (smooth_series(dominant_ankle_y, window=pre_smooth_window), ankle_stable_mask),
+            (smooth_series(knee_values, window=pre_smooth_window), stable_mask),
+        ],
+        times,
+        args.peak_prominence,
+        args.peak_window
+    )
+    if peak_cv is not None and peak_candidates:
+        print(
+            f"ピークウィンドウ最適化: window={peak_window} "
+            f"(candidates={peak_candidates[0]}-{peak_candidates[-1]}), "
+            f"median_cv={peak_cv:.3f}"
+        )
+    else:
+        print(f"ピークウィンドウ最適化: window={peak_window}")
+
     heel_window, heel_cv, smooth_heel_y = select_smoothing_window(
         dominant_heel_y,
         times,
         stable_mask,
+        peak_window=peak_window,
+        peak_prominence=args.peak_prominence,
         max_window=100,
         cv_threshold=0.3,
         min_window=5
@@ -519,6 +1088,8 @@ for item in csv_list:
         dominant_ankle_y,
         times,
         ankle_stable_mask,
+        peak_window=peak_window,
+        peak_prominence=args.peak_prominence,
         max_window=100,
         cv_threshold=0.3,
         min_window=5
@@ -527,6 +1098,8 @@ for item in csv_list:
         dominant_foot_y,
         times,
         stable_mask,
+        peak_window=peak_window,
+        peak_prominence=args.peak_prominence,
         max_window=100,
         cv_threshold=0.3,
         min_window=5
@@ -537,25 +1110,340 @@ for item in csv_list:
         smooth_ankle_y = smooth_ankle_y[: times.size]
     if smooth_foot_y.size > times.size:
         smooth_foot_y = smooth_foot_y[: times.size]
-    heel_stable_mask = stable_mask & (dominant_heel_x >= 0) & (dominant_heel_y >= 0)
-    ankle_stable_mask = ankle_stable_mask & (dominant_ankle_x >= 0) & (dominant_ankle_y >= 0)
 
-    heel_peak_idx, heel_contact_idx, heel_prom = find_contacts_with_fallback(
-        smooth_heel_y,
+    print("== 周期推定用データの準備 ==")
+    dt = np.median(np.diff(times)) if times.size > 1 else 0.0
+    knee_window = int(0.1 / dt) if dt > 0 else 5
+    if knee_window < 5:
+        knee_window = 5
+    if knee_window % 2 == 0:
+        knee_window += 1
+    knee_values = df[f"{dominant_side}_knee_angle"].to_numpy()
+    smooth_knee = smooth_series(knee_values, window=knee_window)
+
+    period_series_raw = [
+        (smooth_heel_y, heel_stable_mask, args.peak_prominence),
+            (smooth_foot_y, toe_stable_mask, args.peak_prominence),
+        (smooth_ankle_y, ankle_stable_mask, args.peak_prominence * 0.5),
+        (smooth_knee, stable_mask, args.peak_prominence),
+    ]
+    period_window, period_candidates, period_cv = select_period_smoothing_window(
+        period_series_raw,
+        times,
+        peak_window,
+        min_window=5,
+        max_window=21
+    )
+    if period_cv is not None and period_candidates:
+        print(
+            f"周期推定 平滑化ウィンドウ: {period_window} フレーム "
+            f"(candidates={period_candidates[0]}-{period_candidates[-1]}), "
+            f"median_cv={period_cv:.3f}"
+        )
+    else:
+        print(f"周期推定 平滑化ウィンドウ: {period_window} フレーム")
+
+    period_series = [
+        ("踵Y", smooth_series(smooth_heel_y, window=period_window), heel_stable_mask, args.peak_prominence),
+        ("つま先Y", smooth_series(smooth_foot_y, window=period_window), toe_stable_mask, args.peak_prominence),
+        ("足首Y", smooth_series(smooth_ankle_y, window=period_window), ankle_stable_mask, args.peak_prominence * 0.5),
+        ("膝角度", smooth_series(smooth_knee, window=period_window), stable_mask, args.peak_prominence),
+    ]
+    baseline_periods = []
+    for _, values, _, _ in period_series:
+        period_sec, _ = estimate_period_autocorr(values, times)
+        if period_sec is not None:
+            baseline_periods.append(period_sec)
+        period_sec, _ = estimate_period_fft(values, times)
+        if period_sec is not None:
+            baseline_periods.append(period_sec)
+    baseline_period = float(np.median(baseline_periods)) if baseline_periods else None
+    baseline_range = None
+    print("== 基準周期の算出 (自己相関/FFT) ==")
+    if baseline_period is not None:
+        baseline_range = (baseline_period * 0.8, baseline_period * 1.2)
+        print(
+            f"基準周期: {baseline_period:.3f}s "
+            f"(自己相関/FFT中央値, 許容±20%)"
+        )
+    else:
+        print("基準周期: 推定不可")
+    min_interval_sec = 0.2
+
+    print("== 周期推定 (自己相関) ==")
+    print("周期推定(自己相関):")
+    for name, values, mask, prominence in period_series:
+        if values.size < 3:
+            print(f"  {name}: データ不足")
+            continue
+        period_sec, score = estimate_period_autocorr(values, times)
+        if period_sec is None:
+            print(f"  {name}: 推定不可")
+            continue
+        print(f"  {name}: period={period_sec:.3f}s, peak={score:.3f}")
+
+    print("== 周期推定 (FFT/PSD) ==")
+    print("周期推定(FFT/PSD):")
+    for name, values, mask, prominence in period_series:
+        if values.size < 3:
+            print(f"  {name}: データ不足")
+            continue
+        period_sec, power = estimate_period_fft(values, times)
+        if period_sec is None:
+            print(f"  {name}: 推定不可")
+            continue
+        print(f"  {name}: period={period_sec:.3f}s, power={power:.3f}")
+
+    print("== バンドパス適用 (ピーク検出) ==")
+    bp_heel = apply_bandpass_fft(smooth_heel_y, times, baseline_period, bandwidth=0.3)
+    bp_foot = apply_bandpass_fft(smooth_foot_y, times, baseline_period, bandwidth=0.3)
+    bp_ankle = apply_bandpass_fft(smooth_ankle_y, times, baseline_period, bandwidth=0.3)
+    print("バンドパス: 基準周期±30% (ピーク検出用)")
+
+    print("== つま先ピーク最適化 ==")
+    toe_peak_window = peak_window
+    toe_peak_prominence = args.peak_prominence
+    smooth_foot_y_peaks = bp_foot
+    if baseline_range is not None:
+        toe_params = select_toe_peak_params(
+            bp_foot,
+            times,
+            toe_stable_mask,
+            baseline_range,
+            peak_window,
+            args.peak_prominence,
+            min_window=5,
+            max_window=21
+        )
+        if toe_params:
+            smooth_foot_y_peaks = toe_params["smooth_vals"]
+            toe_peak_window = toe_params["peak_window"]
+            toe_peak_prominence = toe_params["prominence"]
+            score = toe_params["score"]
+            print(
+                "つま先ピーク最適化: "
+                f"smooth={toe_params['smooth_window']}, "
+                f"peak_window={toe_peak_window}, "
+                f"prominence={toe_peak_prominence:.4f}, "
+                f"in_range={score['count']}, "
+                f"ratio={score['ratio']:.2f}, "
+                f"cv={score['cv']:.3f}"
+            )
+        else:
+            print("つま先ピーク最適化: 該当なし（基準周期内のピーク不足）")
+    else:
+        print("つま先ピーク最適化: 基準周期なしのためスキップ")
+
+    print("== 踵谷最適化 ==")
+    heel_peak_window = peak_window
+    heel_peak_prominence = args.peak_prominence
+    smooth_heel_y_peaks = bp_heel
+    if baseline_range is not None:
+        heel_params = select_heel_valley_params(
+            bp_heel,
+            times,
+            heel_stable_mask,
+            baseline_range,
+            peak_window,
+            args.peak_prominence,
+            min_window=5,
+            max_window=21
+        )
+        if heel_params:
+            smooth_heel_y_peaks = heel_params["smooth_vals"]
+            heel_peak_window = heel_params["peak_window"]
+            heel_peak_prominence = heel_params["prominence"]
+            score = heel_params["score"]
+            print(
+                "踵谷最適化: "
+                f"smooth={heel_params['smooth_window']}, "
+                f"peak_window={heel_peak_window}, "
+                f"prominence={heel_peak_prominence:.4f}, "
+                f"in_range={score['count']}, "
+                f"ratio={score['ratio']:.2f}, "
+                f"cv={score['cv']:.3f}"
+            )
+        else:
+            print("踵谷最適化: 該当なし（基準周期内の谷不足）")
+    else:
+        print("踵谷最適化: 基準周期なしのためスキップ")
+
+    print("== 踵/足首/つま先のピーク検出 ==")
+    heel_peak_idx, heel_contact_idx_raw, heel_prom = find_contacts_with_fallback(
+        smooth_heel_y_peaks,
         times,
         heel_stable_mask,
         min_interval_sec=0.2,
-        peak_prominence=args.peak_prominence,
-        peak_window=args.peak_window
+        peak_prominence=heel_peak_prominence,
+        peak_window=heel_peak_window
     )
+    heel_peak_idx = find_local_extrema(
+        smooth_heel_y_peaks,
+        times,
+        heel_stable_mask,
+        min_interval_sec=0.2,
+        peak_prominence=heel_peak_prominence,
+        peak_window=heel_peak_window,
+        find_max=True
+    )
+    heel_prom = heel_peak_prominence
+    if baseline_range is not None and len(heel_peak_idx) >= 2:
+        intervals = np.diff(times[heel_peak_idx])
+        lo, hi = baseline_range
+        if np.any(intervals > hi):
+            retry = select_heel_valley_params(
+                bp_heel,
+                times,
+                heel_stable_mask,
+                baseline_range,
+                peak_window,
+                args.peak_prominence,
+                min_window=3,
+                max_window=21
+            )
+            if retry:
+                smooth_heel_y_peaks = retry["smooth_vals"]
+                heel_peak_window = retry["peak_window"]
+                heel_peak_prominence = retry["prominence"]
+                score = retry["score"]
+                print(
+                    "踵谷最適化(再探索): "
+                    f"smooth={retry['smooth_window']}, "
+                    f"peak_window={heel_peak_window}, "
+                    f"prominence={heel_peak_prominence:.4f}, "
+                    f"in_range={score['count']}, "
+                    f"ratio={score['ratio']:.2f}, "
+                    f"cv={score['cv']:.3f}"
+                )
+                heel_peak_idx = find_local_extrema(
+                    smooth_heel_y_peaks,
+                    times,
+                    heel_stable_mask,
+                    min_interval_sec=0.2,
+                    peak_prominence=heel_peak_prominence,
+                    peak_window=heel_peak_window,
+                    find_max=True
+                )
+    toe_peak_idx, toe_valley_idx, toe_prom = find_contacts_with_fallback(
+        smooth_foot_y_peaks,
+        times,
+        toe_stable_mask,
+        min_interval_sec=0.2,
+        peak_prominence=toe_peak_prominence,
+        peak_window=toe_peak_window
+    )
+    if baseline_range is not None and toe_peak_idx:
+        pruned_peaks, removed = prune_peaks_by_min_interval(
+            toe_peak_idx, times, baseline_range
+        )
+        if removed > 0:
+            print(
+                f"つま先ピーク剪定: removed={removed}, remaining={len(pruned_peaks)}"
+            )
+        toe_peak_idx = pruned_peaks
+        toe_valley_idx = recompute_valleys_between_peaks(
+            smooth_foot_y_peaks, toe_peak_idx, toe_stable_mask
+        )
+        if len(toe_peak_idx) >= 2:
+            intervals = np.diff(times[toe_peak_idx])
+            lo, hi = baseline_range
+            if np.any(intervals > hi):
+                retry = select_toe_peak_params(
+                    bp_foot,
+                    times,
+                    toe_stable_mask,
+                    baseline_range,
+                    peak_window,
+                    args.peak_prominence,
+                    prominences=[
+                        args.peak_prominence,
+                        args.peak_prominence * 0.5,
+                        args.peak_prominence * 0.25,
+                    ],
+                    min_window=3,
+                    max_window=21
+                )
+                if retry:
+                    smooth_foot_y_peaks = retry["smooth_vals"]
+                    toe_peak_window = retry["peak_window"]
+                    toe_peak_prominence = retry["prominence"]
+                    score = retry["score"]
+                    print(
+                        "つま先ピーク最適化(再探索): "
+                        f"smooth={retry['smooth_window']}, "
+                        f"peak_window={toe_peak_window}, "
+                        f"prominence={toe_peak_prominence:.4f}, "
+                        f"in_range={score['count']}, "
+                        f"ratio={score['ratio']:.2f}, "
+                        f"cv={score['cv']:.3f}"
+                    )
+                    toe_peak_idx, toe_valley_idx, toe_prom = find_contacts_with_fallback(
+                        smooth_foot_y_peaks,
+                        times,
+                        toe_stable_mask,
+                        min_interval_sec=0.2,
+                        peak_prominence=toe_peak_prominence,
+                        peak_window=toe_peak_window
+                    )
+                    pruned_peaks, removed = prune_peaks_by_min_interval(
+                        toe_peak_idx, times, baseline_range
+                    )
+                    if removed > 0:
+                        print(
+                            f"つま先ピーク剪定: removed={removed}, remaining={len(pruned_peaks)}"
+                        )
+                    toe_peak_idx = pruned_peaks
+                    toe_valley_idx = recompute_valleys_between_peaks(
+                        smooth_foot_y_peaks, toe_peak_idx, toe_stable_mask
+                    )
+    print("== 踵接地(複合条件)の判定 ==")
+    heel_contact_idx = heel_contact_idx_raw
+    composite_info = {}
+    composite_used = False
+    if args.use_composite_heel:
+        period_sec = None
+        if baseline_period is not None:
+            period_sec = baseline_period
+        heel_contact_idx, composite_info = filter_contacts_by_composite_conditions(
+            heel_contact_idx_raw,
+            toe_peak_idx,
+            toe_valley_idx,
+            heel_peak_idx,
+            smooth_foot_y_peaks,
+            smooth_heel_y_peaks,
+            times,
+            period_sec
+        )
+        composite_used = True
+        if not heel_contact_idx:
+            print("踵接地(複合条件)が検出できませんでした。")
+        else:
+            contact_times = [f"{times[i]:.3f}" for i in heel_contact_idx]
+            print(
+                "踵接地(複合条件) 検出: "
+                f"{len(heel_contact_idx)}件 "
+                f"times=[{', '.join(contact_times)}]"
+            )
     ankle_peak_idx, ankle_contact_idx, ankle_prom = find_contacts_with_fallback(
-        smooth_ankle_y,
+        bp_ankle,
         times,
         ankle_stable_mask,
-        min_interval_sec=0.2,
+        min_interval_sec=min_interval_sec,
         peak_prominence=args.peak_prominence,
-        peak_window=args.peak_window
+        peak_window=peak_window
     )
+    print(
+        f"ピーク数: 踵谷={len(heel_peak_idx)}, つま先山={len(toe_peak_idx)}, 足首山={len(ankle_peak_idx)}"
+    )
+    if heel_peak_idx:
+        heel_times = ", ".join(f"{times[i]:.3f}" for i in heel_peak_idx)
+        print(f"踵谷時刻: [{heel_times}]")
+    if toe_peak_idx:
+        toe_times = ", ".join(f"{times[i]:.3f}" for i in toe_peak_idx)
+        print(f"つま先山時刻: [{toe_times}]")
+    if ankle_peak_idx:
+        ankle_times = ", ".join(f"{times[i]:.3f}" for i in ankle_peak_idx)
+        print(f"足首山時刻: [{ankle_times}]")
 
     ankle_fallback_idx = []
     for i in ankle_contact_idx:
@@ -580,9 +1468,27 @@ for item in csv_list:
             f"median={np.median(stable_knee_to_ankle):.4f}"
         )
     print(f"トラッキング不安定フレーム率: {unstable_ratio:.1f}%")
+    ankle_valid_ratio = ankle_stable_mask.mean() * 100.0
+    ankle_segments = mask_to_segments(times, ankle_stable_mask)
+    ankle_durations = [end - start for start, end in ankle_segments]
+    if ankle_durations:
+        ankle_median = float(np.median(ankle_durations))
+        ankle_max = float(np.max(ankle_durations))
+        print(
+            f"足首安定マスク: 有効率={ankle_valid_ratio:.1f}%, "
+            f"連続区間={len(ankle_durations)}件, "
+            f"median={ankle_median:.3f}s, max={ankle_max:.3f}s"
+        )
+    else:
+        print(f"足首安定マスク: 有効率={ankle_valid_ratio:.1f}%, 連続区間=0件")
+    heel_contact_label = f"{dominant_label} 踵接地"
+    if composite_used:
+        heel_contact_label = f"{dominant_label} 踵接地(複合条件)"
     print(
         f"接地検出: 踵={len(heel_contact_idx)}件, 足首(補完)={len(ankle_fallback_idx)}件"
     )
+    if composite_used and composite_info:
+        print("複合条件: つま先山→(推定周期以内の)つま先谷→踵谷")
     heel_cv_text = f"{heel_cv:.3f}" if heel_cv is not None else "n/a"
     ankle_cv_text = f"{ankle_cv:.3f}" if ankle_cv is not None else "n/a"
     foot_cv_text = f"{foot_cv:.3f}" if foot_cv is not None else "n/a"
@@ -594,6 +1500,96 @@ for item in csv_list:
     print(
         f"ピーク判定プロミネンス: 踵={heel_prom:.4f}, 足首={ankle_prom:.4f}"
     )
+
+    print("== 歩行周期安定区間の抽出 ==")
+    stable_cycle_segments = []
+    contact_source = heel_contact_idx
+    if not args.use_composite_heel and len(contact_source) < 2 and len(heel_contact_idx_raw) >= 2:
+        print("歩行周期安定区間: 踵接地が不足のため、従来の踵接地で計算します。")
+        contact_source = heel_contact_idx_raw
+    if len(contact_source) >= 2:
+        contact_times = times[contact_source]
+        cycle_intervals = np.diff(contact_times)
+        if baseline_range is not None:
+            lo, hi = baseline_range
+            stable_dt = (cycle_intervals >= lo) & (cycle_intervals <= hi)
+            for i, ok in enumerate(stable_dt):
+                if ok:
+                    stable_cycle_segments.append((contact_times[i], contact_times[i + 1]))
+            if stable_cycle_segments:
+                print(
+                    f"歩行周期安定区間: {len(stable_cycle_segments)}件, "
+                    f"range={lo:.3f}-{hi:.3f}s"
+                )
+            else:
+                print("歩行周期安定区間: 該当なし（基準周期±20%内なし）")
+        else:
+            median_cycle = np.median(cycle_intervals)
+            tol = median_cycle * 0.2
+            stable_dt = np.abs(cycle_intervals - median_cycle) <= tol
+            for i, ok in enumerate(stable_dt):
+                if ok:
+                    stable_cycle_segments.append((contact_times[i], contact_times[i + 1]))
+            if stable_cycle_segments:
+                print(
+                    f"歩行周期安定区間: {len(stable_cycle_segments)}件, "
+                    f"median={median_cycle:.3f}s, tol=±{tol:.3f}s"
+                )
+            else:
+                print("歩行周期安定区間: 該当なし（±20%以内の周期なし）")
+    else:
+        print("歩行周期安定区間: 踵接地が不足（2点未満）")
+    print("== 周期推定 (ピーク間隔) ==")
+    reliable_intervals = []
+    print("周期推定(ピーク間隔):")
+    for name, values, mask, prominence in period_series:
+        peak_max = find_local_extrema(
+            values, times, mask,
+            min_interval_sec=0.2,
+            peak_prominence=prominence,
+            peak_window=peak_window,
+            find_max=True
+        )
+        peak_min = find_local_extrema(
+            values, times, mask,
+            min_interval_sec=0.2,
+            peak_prominence=prominence,
+            peak_window=peak_window,
+            find_max=False
+        )
+        def intervals_with_cv(peak_list):
+            intervals = np.diff(times[peak_list]) if len(peak_list) >= 2 else np.array([])
+            if baseline_range is not None and intervals.size > 0:
+                lo, hi = baseline_range
+                intervals = intervals[(intervals >= lo) & (intervals <= hi)]
+            if intervals.size >= 2:
+                mean = intervals.mean()
+                cv = intervals.std() / mean if mean != 0 else None
+                return intervals, cv
+            return intervals, None
+
+        best_peaks = peak_max
+        intervals, best_cv = intervals_with_cv(peak_max)
+        alt_intervals, alt_cv = intervals_with_cv(peak_min)
+        if alt_cv is not None and (best_cv is None or alt_cv < best_cv):
+            best_peaks = peak_min
+            intervals = alt_intervals
+            best_cv = alt_cv
+
+        if intervals.size < 2:
+            print(f"  {name}: ピーク不足")
+            continue
+        median = np.median(intervals)
+        cv = best_cv if best_cv is not None else float("inf")
+        print(f"  {name}: peaks={len(best_peaks)}, median={median:.3f}s, cv={cv:.3f}")
+        if cv <= 0.2:
+            reliable_intervals.append(median)
+
+    if reliable_intervals:
+        consensus = float(np.median(reliable_intervals))
+        print(f"共通周期(中央値): {consensus:.3f}s")
+    else:
+        print("共通周期(中央値): 信頼できる系列が不足")
 
     per_joint_rates = summarize_unstable_rates(
         {"hip": speed_hip, "knee": speed_knee, "ankle": speed_ankle},
@@ -764,29 +1760,31 @@ for item in csv_list:
     if heel_contact_idx:
         axes[4].scatter(
             times[heel_contact_idx],
-            smooth_heel_y[heel_contact_idx],
-            s=30,
-            color='black',
-            marker='o',
-            label=f'{dominant_label} 踵接地'
+            np.full(len(heel_contact_idx), 0.02),
+            s=120,
+            color='green',
+            marker='|',
+            linewidths=2,
+            transform=axes[4].get_xaxis_transform(),
+            label=f'{dominant_label} 踵接地(安定ライン)'
         )
-    if heel_peak_idx:
+    heel_valley_plot_idx = heel_peak_idx
+    if baseline_range is not None and len(heel_peak_idx) >= 2:
+        lo, hi = baseline_range
+        keep = [heel_peak_idx[0]]
+        for i in range(1, len(heel_peak_idx)):
+            dt = times[heel_peak_idx[i]] - times[heel_peak_idx[i - 1]]
+            if lo <= dt <= hi:
+                keep.append(heel_peak_idx[i])
+        heel_valley_plot_idx = keep
+    if heel_valley_plot_idx:
         axes[4].scatter(
-            times[heel_peak_idx],
-            smooth_heel_y[heel_peak_idx],
-            s=20,
-            color='gray',
-            marker='^',
-            label=f'{dominant_label} 踵遊脚ピーク'
-        )
-    if ankle_fallback_idx:
-        axes[4].scatter(
-            times[ankle_fallback_idx],
-            smooth_ankle_y[ankle_fallback_idx],
-            s=30,
+            times[heel_valley_plot_idx],
+            smooth_heel_y[heel_valley_plot_idx],
+            s=35,
             color='black',
-            marker='x',
-            label=f'{dominant_label} 足首接地(補完)'
+            marker='v',
+            label=f'{dominant_label} 踵の谷'
         )
     if ankle_peak_idx:
         axes[4].scatter(
@@ -795,7 +1793,16 @@ for item in csv_list:
             s=20,
             color='gray',
             marker='^',
-            label=f'{dominant_label} 足首遊脚ピーク'
+            label=None
+        )
+    if toe_peak_idx:
+        axes[4].scatter(
+            times[toe_peak_idx],
+            smooth_foot_y[toe_peak_idx],
+            s=35,
+            color='black',
+            marker='^',
+            label=f'{dominant_label} つま先の山'
         )
     axes[4].set_title('踵/足首の上下動（平滑化）と接地/ピーク', fontsize=14)
     axes[4].set_ylabel('高さ (Y座標)', fontsize=12)
@@ -836,6 +1843,18 @@ for item in csv_list:
     axes[5].set_xlabel('時間 (秒)', fontsize=12)
     axes[5].set_ylabel('角度 (度)', fontsize=12)
     axes[5].legend(loc='upper right')
+
+    if stable_cycle_segments:
+        for start_t, end_t in stable_cycle_segments:
+            axes[4].hlines(
+                0.02,
+                start_t,
+                end_t,
+                color='green',
+                linewidth=4,
+                alpha=0.6,
+                transform=axes[4].get_xaxis_transform()
+            )
 
     unstable_segments_map = {
         0: mask_to_segments(times, unstable_hip),
